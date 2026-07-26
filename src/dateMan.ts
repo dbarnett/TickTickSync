@@ -439,7 +439,12 @@ export class DateMan {
 				// } else if ((key == 'scheduled_date') || (key == 'startDate')) {
 				// 	timeToSet = '00:01';
 				// }
-				returnDate = `${dateData[2]}T00:00:00.000`;
+				// Explicit UTC ('Z') so this date-only value parses to the same
+				// calendar day regardless of host OS timezone. Without it,
+				// `new Date(...)` treats the bare string as host-local midnight,
+				// which drifts the effective UTC instant (and thus the displayed
+				// date) by up to a day on repeated sync round-trips.
+				returnDate = `${dateData[2]}T00:00:00.000Z`;
 				bhasATime = false;
 			} else {
 				if (dateData[3].includes('24:')) {
