@@ -394,25 +394,16 @@ export class TaskModificationDetector {
 		// Preserve timezone
 		lineTask.timeZone = savedTask.timeZone;
 
-		// Check for project move
+		// A task's line moving to a different vault file never pushes a
+		// TickTick project change -- Project is never touched from
+		// Obsidian. Just record the new file mapping.
 		const moveCheck = await this.checkForTaskMove(taskId, filepath);
 		if (moveCheck.moved) {
-			await this.handleProjectMove(lineTask, savedTask, moveCheck.oldFilePath, filepath);
 			modifications.projectMoved = true;
 			modified = true;
 
-			// Immediately persist the new file mapping to DB so subsequent API
-			// failures don't leave the local record stale, preventing a sync loop.
 			lineTask.lineHash = newHash;
 			await this.plugin.taskRepository.upsertTask(lineTask, filepath, Date.now());
-		}
-
-		// Handle project change from tag modification
-		if (modifications.tagsModified && !modifications.projectMoved) {
-			if (lineTask.projectId && savedTask.projectId && lineTask.projectId !== savedTask.projectId) {
-				await this.plugin.tickTickRestAPI?.moveTaskProject(lineTask, savedTask.projectId, lineTask.projectId);
-				modified = true;
-			}
 		}
 
 		// Handle parent change
@@ -489,18 +480,6 @@ export class TaskModificationDetector {
 		const oldFilePath = await this.plugin.fileMetadataService.getFilepathForTask(taskId);
 		const moved = !!(oldFilePath && oldFilePath !== currentPath);
 		return { moved, oldFilePath: oldFilePath || '' };
-	}
-
-	/**
-	 * Handle task moving between projects/files
-	 * Also checks if project groups differ and moves file if necessary
-	 */
-	private async handleProjectMove(newTask: ITask, oldTask: ITask, oldPath: string, newPath: string): Promise<void> {
-		await this.plugin.tickTickRestAPI?.moveTaskProject(newTask, oldTask.projectId, newTask.projectId);
-
-		const message = `Task ${newTask.id} moved from ${oldPath} to ${newPath}`;
-		new Notice(message, 5000);
-		log.debug(message);
 	}
 
 	/**

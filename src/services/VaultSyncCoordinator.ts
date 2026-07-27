@@ -34,8 +34,6 @@ export class VaultSyncCoordinator {
 		if (syncTag && syncTag.includes('/')) {
 			syncTag = syncTag.replace(/\//g, '-');
 		}
-		const syncProject = getSettings().SyncProject;
-		const andOr = getSettings().tagAndOr;
 
 		// Group tasks by file
 		const fileGroups: Map<string, { toAdd: ITask[], toUpdate: ITask[], toDelete: ITask[] }> = new Map();
@@ -46,7 +44,7 @@ export class VaultSyncCoordinator {
 		// Categorize tasks by their target file and action needed
 		for (const lt of tasks) {
 			const task = lt.task;
-			const matchesFilter = this.matchesFilter(task, syncTag, syncProject, andOr);
+			const matchesFilter = this.matchesFilter(task, syncTag);
 
 			let targetFile: string | undefined;
 
@@ -127,13 +125,20 @@ export class VaultSyncCoordinator {
 	}
 
 	/**
-	 * Determine the target file for a task based on its project
+	 * Determine the target file for an untracked task (no known lt.file).
 	 *
-	 * Priority:
-	 * 1. If task has default project ID, check if it exists in any unassociated vault files
-	 *    (handles multi-device sync where files arrive before DB is updated)
-	 * 2. File associated with the task's specific project (with folder structure if enabled)
-	 * 3. File associated with the default project
+	 * Deliberately does NOT fall back to "find/create a file for this
+	 * task's project" (the old defaultProjectId reverse lookup) -- that
+	 * silently fanned tasks out into arbitrary notes the first time any
+	 * file happened to get tagged with a matching project, with zero
+	 * explicit action from the user. If a task isn't already tracked in a
+	 * specific vault file, it's simply left untracked (TT-only) until the
+	 * user explicitly ties it to a note.
+	 *
+	 * TODO(orphan-tasks): add an explicit "Insert existing TT task here"
+	 * command (fuzzy picker over untracked TT tasks) as the intentional
+	 * way to bring a task into the vault, replacing the old implicit
+	 * materialization this function used to do.
 	 */
 	private async determineTargetFile(
 		task: ITask,
@@ -141,9 +146,11 @@ export class VaultSyncCoordinator {
 	): Promise<string | undefined> {
 		const defaultProjectId = getSettings().defaultProjectId;
 
-		// Special handling for tasks with default project ID:
-		// Check if this task exists in a vault file that isn't yet in the DB
-		// This handles the case where files sync via external mechanism before DB updates
+		// Check if this task's ID already appears in some vault file that
+		// isn't yet in the DB (e.g. the user manually placed a
+		// %%[ticktick_id::...]%% marker, or a file synced via an external
+		// mechanism before the DB caught up). This only matches an
+		// explicit, already-present marker -- not project-based inference.
 		if (task.projectId === defaultProjectId) {
 			const fileWithTask = await this.findTaskInUnassociatedFiles(task.id);
 			if (fileWithTask) {
@@ -156,7 +163,8 @@ export class VaultSyncCoordinator {
 			return cache.get(task.projectId)!;
 		}
 
-		// Use FolderSyncService if available (handles folder structure)
+		// Use FolderSyncService if available (handles folder structure).
+		// Only fires when keepProjectFolders is enabled (default: off).
 		let targetFile: string | undefined;
 		if (this.folderSyncService && getSettings().keepProjectFolders) {
 			const projectRecord = await db.projects.get(task.projectId);
@@ -170,14 +178,6 @@ export class VaultSyncCoordinator {
 					log.debug(`Ensuring folder exists: ${folderPath}`);
 					await this.folderSyncService.ensureFolderExists(folderPath);
 				}
-			}
-		}
-
-		// Fallback to legacy behavior
-		if (!targetFile) {
-			targetFile = await this.plugin.fileMetadataService.getFilepathForProjectId(task.projectId);
-			if (!targetFile) {
-				targetFile = await this.plugin.fileMetadataService.getFilepathForProjectId(defaultProjectId);
 			}
 		}
 
@@ -238,18 +238,11 @@ export class VaultSyncCoordinator {
 	}
 
 	/**
-	 * Check if a task matches the sync filter (tag/project)
+	 * Check if a task matches the sync filter (tag)
 	 */
-	private matchesFilter(task: ITask, syncTag?: string, syncProject?: string, andOr?: number): boolean {
-		if (!syncTag && !syncProject) return true;
-
-		const hasTag = syncTag ? (task.tags?.some(t => t.toLowerCase() === syncTag) ?? false) : false;
-		const hasProject = syncProject ? task.projectId === syncProject : false;
-
-		if (syncTag && syncProject) {
-			return andOr === 1 ? (hasTag && hasProject) : (hasTag || hasProject);
-		}
-		return hasTag || hasProject;
+	private matchesFilter(task: ITask, syncTag?: string): boolean {
+		if (!syncTag) return true;
+		return task.tags?.some(t => t.toLowerCase() === syncTag) ?? false;
 	}
 
 	/**

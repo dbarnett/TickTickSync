@@ -6,7 +6,7 @@ export interface OrphanItem {
 	projectName?: string;
 }
 
-export type OrphanAction = 'add' | 'delete' | 'cancel';
+export type OrphanAction = 'delete' | 'cancel';
 
 export class OrphanTaskModal extends Modal {
 	title = 'Orphaned TickTick Tasks';
@@ -66,15 +66,6 @@ export class OrphanTaskModal extends Modal {
 				deleteBtn.setButtonText('Delete from ticktick');
 				deleteBtn.onClick(() => {
 					this.action = 'delete';
-					this.close();
-				});
-			})
-			.addButton(addBtn => {
-				addBtn.setClass('ts_button');
-				addBtn.setCta();
-				addBtn.setButtonText('Add to file & db');
-				addBtn.onClick(() => {
-					this.action = 'add';
 					this.close();
 				});
 			});

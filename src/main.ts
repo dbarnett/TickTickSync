@@ -16,7 +16,6 @@ import { TaskParser } from './taskParser';
 import { FileOperation } from './fileOperation';
 
 //import modals
-import { SetDefaultProjectForFileModal } from './modals/DefaultProjectModal';
 import { LatestChangesModal } from './modals/LatestChangesModal';
 import { CleanupDeletedTasksModal } from './modals/CleanupDeletedTasksModal';
 import { RecoverDeletedTasksModal } from './modals/RecoverDeletedTasksModal';
@@ -276,7 +275,6 @@ export default class TickTickSync extends Plugin {
 		//NEW: Initialize services
 		this.projectSyncService = new ProjectSyncService(this.app, this);
 		this.folderSyncService = new FolderSyncService(this.app, this, this.projectGroupRepository);
-		this.projectSyncService.setFolderSyncService(this.folderSyncService);
 		this.folderMigrationService = new FolderMigrationService(this.app, this.folderSyncService);
 		this.vaultSyncCoordinator = new VaultSyncCoordinator(this.app, this, this.folderSyncService);
 		this.taskModificationDetector = new TaskModificationDetector(this.app, this, this.folderSyncService);
@@ -610,20 +608,6 @@ export default class TickTickSync extends Plugin {
 		this.registerEvents();
 		this.reloadInterval();
 
-		// set default project for TickTick task in the current file
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'tts-default-project-for-file',
-			name: 'Set default ticktick project for current file',
-			editorCallback: (editor: Editor, view: MarkdownView | MarkdownFileInfo) => {
-				if (!view || !view.file) {
-					new Notice(`No active file.`);
-					return;
-				}
-				const filepath = view.file.path;
-				new SetDefaultProjectForFileModal(this.app, this, filepath);
-			}
-		});
 		this.addCommand({
 			id: 'tts-sync',
 			name: 'Synchronize',
@@ -690,11 +674,6 @@ export default class TickTickSync extends Plugin {
 			delete data.username;
 			delete data.password;
 		}
-		if ((!data.version) || (isOlder(data.version as string, '1.0.36'))) {
-			//default to AND because that's what we used to do:
-			data.tagAndOr = 1;
-		}
-
 		//BIG Change. BIG I tell you!
 		const isOlderResult = (!data.version) || isOlder(data.version as string, '2.0.0');
 		if (isOlderResult) {

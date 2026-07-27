@@ -246,27 +246,6 @@ export class FileTaskQueries {
 	}
 
 	/**
-	 * Get the default project ID for a filepath with fallback chain
-	 * Falls back: file.defaultProjectId → settings.defaultProjectId → settings.inboxID
-	 */
-	async getDefaultProjectIdForFilepath(filepath: string): Promise<string | undefined> {
-		try {
-			const file = await getFile(filepath);
-			if (file && file.defaultProjectId) {
-				return file.defaultProjectId;
-			}
-			let defaultProjectId = getSettings().defaultProjectId;
-			if (!defaultProjectId) {
-				defaultProjectId = getSettings().inboxID;
-			}
-			return defaultProjectId;
-		} catch (error) {
-			log.error(`Error getting default project ID for ${filepath}:`, error);
-			return undefined;
-		}
-	}
-
-	/**
 	 * Get items for deletion confirmation modal
 	 */
 	async getDeletionItems(taskIds: string[]): Promise<Array<{ title: string; filePath: string }>> {

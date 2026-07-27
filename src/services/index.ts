@@ -162,21 +162,12 @@ export class TickTickService {
 	async ensureVaultFilesRegistered(): Promise<void> {
 		const vault = this.plugin.app.vault;
 		const markdownFiles = vault.getMarkdownFiles();
-		const allProjects = await this.getProjects();
 
 		for (const file of markdownFiles) {
 			const dbFile = await getFile(file.path);
 			if (!dbFile) {
-				// Look up file name in projects cache to auto-associate
-				const fileName = file.basename;
-				const matchingProject = allProjects.find(p => p.name === fileName);
-				if (matchingProject) {
-					log.debug(`Auto-associating file with project: ${file.path} -> ${matchingProject.name}`);
-					await upsertFile(file.path, matchingProject.id);
-				} else {
-					log.debug(`Registering file without project association: ${file.path}`);
-					await upsertFile(file.path);
-				}
+				log.debug(`Registering file: ${file.path}`);
+				await upsertFile(file.path);
 			}
 		}
 	}
@@ -410,27 +401,12 @@ export class TickTickService {
 				}
 			}
 
-			// 2. Ensure all vault files are in DB and match with projects if possible
+			// 2. Ensure all vault files are in DB
 			for (const file of markdownFiles) {
 				const dbFile = await getFile(file.path);
 				if (!dbFile) {
-					// Look up file name in projects cache
-					const fileName = file.basename;
-					const matchingProject = allProjects.find(p => p.name === fileName);
-					if (matchingProject) {
-						log.debug(`Matching project found for new DB entry: ${file.path} -> ${matchingProject.name}`);
-						await upsertFile(file.path, matchingProject.id);
-					} else {
-						log.debug(`Adding new DB entry for file: ${file.path}`);
-						await upsertFile(file.path);
-					}
-				} else {
-					const fileName = file.basename;
-					const matchingProject = allProjects.find(p => p.name === fileName);
-					if (matchingProject?.id != dbFile.defaultProjectId) {
-						log.debug(`Project mismatch  DB entry: ${file.path} -> ${matchingProject?.id} vs ${dbFile.defaultProjectId}`);
-						await upsertFile(file.path, matchingProject?.id);
-					}
+					log.debug(`Adding new DB entry for file: ${file.path}`);
+					await upsertFile(file.path);
 				}
 			}
 
@@ -577,7 +553,16 @@ export class TickTickService {
 		log.debug(`Found ${tasksToDelete.length} tasks to be deleted.`);
 		log.debug(`Known local task IDs: ${allLocalIds.size}.`);
 
-		// Scan TickTick for tasks that have no local reference at all
+		// Scan TickTick for tasks that have no local reference at all.
+		// These are TT-only tasks -- deliberately NOT auto-materialized into
+		// any vault file (that used to happen via a defaultProjectId reverse
+		// lookup, which silently fanned tasks out into arbitrary notes with
+		// zero explicit user action). The modal below only offers deleting
+		// them from TickTick; bringing one into the vault is something the
+		// user has to do explicitly.
+		// TODO(orphan-tasks): add an explicit "Insert existing TT task
+		// here" command (fuzzy picker over these orphaned/untracked TT
+		// tasks) as the intentional way to bring one into a note.
 		try {
 			const allTickTickData = (await this.plugin.tickTickRestAPI?.getAllTasks()) as unknown as { update: ITask[] } | undefined;
 			const allTickTickTasks = (allTickTickData?.update || []) as Array<ITask & { taskId?: string }>;
@@ -590,10 +575,9 @@ export class TickTickService {
 					if (ttTask.deleted === 1) { log.debug(`[checkDB] TT-scan: skip ${ttId} — deleted on TickTick`); continue; }
 					if (allLocalIds.has(ttId)) { log.debug(`[checkDB] TT-scan: skip ${ttId} — already in local IDs`); continue; }
 					if (resolveIds.has(ttId)) { log.debug(`[checkDB] TT-scan: skip ${ttId} — already in resolve list`); continue; }
-					const filepath = await this.plugin.fileMetadataService?.getFilepathForProjectId(ttTask.projectId) || '';
-					log.debug(`[checkDB] TT-scan: ORPHAN ${ttId} — no local reference (title="${ttTask.title}", projectId=${ttTask.projectId}, filepath="${filepath}")`);
+					log.debug(`[checkDB] TT-scan: ORPHAN ${ttId} — no local reference (title="${ttTask.title}", projectId=${ttTask.projectId})`);
 					tasksToResolve.push({
-						filepath,
+						filepath: '',
 						taskId: ttId,
 						title: ttTask.title || ttId,
 						projectId: ttTask.projectId,
@@ -624,22 +608,7 @@ export class TickTickService {
 			const modal = new OrphanTaskModal(this.plugin.app, orphanItems);
 			const action = await modal.showModal();
 			log.debug(`[checkDB] User chose action "${action}" for orphaned tasks`);
-			if (action === 'add') {
-				await doWithLock(LOCK_TASKS, async () => {
-					for (const t of tasksToResolve) {
-						const targetFilepath = t.filepath || (await this.plugin.fileMetadataService?.getFilepathForProjectId(t.projectId)) || '';
-						await this.plugin.taskRepository.upsertTask(t.task, targetFilepath, Date.now());
-						if (!t.inFile && targetFilepath) {
-							try {
-								await this.plugin.fileOperation?.synchronizeToVault(targetFilepath, [t.task], false);
-							} catch (err) {
-								log.warn(`Could not add task ${t.taskId} to file ${t.filepath}:`, err);
-							}
-						}
-					}
-				});
-				new Notice(`Added ${tasksToResolve.length} orphaned task(s) to vault and database.`);
-			} else if (action === 'delete') {
+			if (action === 'delete') {
 				await doWithLock(LOCK_TASKS, async () => {
 					for (const t of tasksToResolve) {
 						try {
@@ -720,10 +689,6 @@ export class TickTickService {
 		await this.plugin.taskOperationsService.reopenTask(taskId);
 	}
 
-	// private async syncTickTickToObsidian(): Promise<boolean> {
-	// 	return this.tickTickSync.syncTickTickToObsidian();
-	// }
-
 	/**
 	 * @param bForceUpdate
 	 */
@@ -734,12 +699,6 @@ export class TickTickService {
 			return;
 		}
 		let newFilesToSync = filesToSync;
-		//If one project is to be synced, don't look at it's other files.
-
-		if (getSettings().SyncProject) {
-			newFilesToSync = Object.fromEntries(Object.entries(filesToSync).filter(([key, value]) =>
-				value.defaultProjectId === getSettings().SyncProject));
-		}
 
 		//Check for duplicates before we do anything
 		try {

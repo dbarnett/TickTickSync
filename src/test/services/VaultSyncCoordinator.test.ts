@@ -35,8 +35,6 @@ vi.mock('@/db/dexie', () => ({
 vi.mock('@/settings', () => ({
 	getSettings: vi.fn(() => ({
 		SyncTag: undefined,
-		SyncProject: undefined,
-		tagAndOr: 0,
 		defaultProjectId: 'default-project-id',
 		keepProjectFolders: false,
 	})),
@@ -154,47 +152,17 @@ describe('VaultSyncCoordinator', () => {
 
 		it('should return true when no filter is set', () => {
 			const task = { id: 't1', projectId: 'p1', tags: ['work'] } as ITask;
-			expect(fn(task, undefined, undefined, 0)).toBe(true);
+			expect(fn(task, undefined)).toBe(true);
 		});
 
 		it('should return true when task matches syncTag', () => {
 			const task = { id: 't1', projectId: 'p1', tags: ['work'] } as ITask;
-			expect(fn(task, 'work', undefined, 0)).toBe(true);
+			expect(fn(task, 'work')).toBe(true);
 		});
 
 		it('should return false when task does not match syncTag', () => {
 			const task = { id: 't1', projectId: 'p1', tags: ['personal'] } as ITask;
-			expect(fn(task, 'work', undefined, 0)).toBe(false);
-		});
-
-		it('should return true when task matches syncProject', () => {
-			const task = { id: 't1', projectId: 'p1', tags: [] } as ITask;
-			expect(fn(task, undefined, 'p1', 0)).toBe(true);
-		});
-
-		it('should return false when task does not match syncProject', () => {
-			const task = { id: 't1', projectId: 'p2', tags: [] } as ITask;
-			expect(fn(task, undefined, 'p1', 0)).toBe(false);
-		});
-
-		it('should return true with AND filter when both match', () => {
-			const task = { id: 't1', projectId: 'p1', tags: ['work'] } as ITask;
-			expect(fn(task, 'work', 'p1', 1)).toBe(true);
-		});
-
-		it('should return false with AND filter when only one matches', () => {
-			const task = { id: 't1', projectId: 'p1', tags: ['personal'] } as ITask;
-			expect(fn(task, 'work', 'p1', 1)).toBe(false);
-		});
-
-		it('should return true with OR filter when one matches', () => {
-			const task = { id: 't1', projectId: 'p1', tags: ['personal'] } as ITask;
-			expect(fn(task, 'work', 'p1', 0)).toBe(true);
-		});
-
-		it('should return false with OR filter when neither matches', () => {
-			const task = { id: 't1', projectId: 'p2', tags: ['personal'] } as ITask;
-			expect(fn(task, 'work', 'p1', 0)).toBe(false);
+			expect(fn(task, 'work')).toBe(false);
 		});
 	});
 
