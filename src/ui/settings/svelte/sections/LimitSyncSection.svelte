@@ -2,21 +2,12 @@
 	import CollapsibleSection from '@/ui/settings/svelte/sections/CollapsibleSection.svelte'
 	import { createEventDispatcher } from 'svelte';
 	import { onMount } from 'svelte';
-	import { Notice } from 'obsidian';
-	import { TAGS_BEHAVIOR } from '@/ui/settings/svelte/constants.svelte.js';
 	import { settingsStore } from '@/ui/settings/settingsstore';
 
 	export let open = false;
 	export let plugin;
 
-	let projects: Array<{ id: string; name: string }> = [];
-	let myProjectsOptions: Record<string, string> = {};
-	let selectedSyncProject = '';
-	let defaultProjectId = '';
-	let tagAndOr: number = 1;
-	$: tagAndOrString = tagAndOr.toString();
 	let syncTag = '';
-	let folder = '';
 	let debounceTimeout: ReturnType<typeof setTimeout>;
 
 	const dispatch = createEventDispatcher();
@@ -25,59 +16,9 @@
 		dispatch('toggle');
 	}
 
-	type SyncExplanationData = {
-		project?: string,
-		tag?: string,
-		andOr?: boolean // true = AND, false = OR, undefined = not applicable
-	};
-
 	// Sync with store on load and change
-	$: selectedSyncProject = $settingsStore.SyncProject ?? '';
-	$: defaultProjectId = $settingsStore.defaultProjectId ?? '';
-	$: tagAndOr = $settingsStore.tagAndOr ?? 1;
 	$: syncTag = $settingsStore.SyncTag ?? '';
 
-	async function handleSyncProjectChange(value: string) {
-		settingsStore.update((s) => ({ ...s, SyncProject: value }));
-		selectedSyncProject = value;
-
-		const fileMetaData = await plugin.fileMetadataService?.getAllFileMetadata() ?? {};
-		const defaultProjectFileEntry = Object.values(fileMetaData).find(
-			(obj: any) => obj.defaultProjectId === value
-		);
-		if (!defaultProjectFileEntry) {
-			const noticeMsg = `Did not find a default Project File for Project ${
-				myProjectsOptions?.[value]
-			}. Please create a file and set its default to this project, or select a file to be the default for this project.`;
-			new Notice(noticeMsg, 5000);
-		}
-		await plugin.saveSettings();
-	}
-	async function handleTagAndOrChange(value: string) {
-		const num = parseInt(value);
-		settingsStore.update((s) => ({ ...s, tagAndOr: num }));
-		tagAndOr = num;
-		await plugin.saveSettings();
-	}
-
-	let syncExplanationData: SyncExplanationData = {};
-
-	function updateSyncExplanationData(myProjectsOptions: Record<string, string>) {
-		const project = myProjectsOptions[$settingsStore.SyncProject];
-		const tag = $settingsStore.SyncTag;
-		const andOr = (project && tag) ? ($settingsStore.tagAndOr == 1) : undefined;
-
-		syncExplanationData = { project, tag, andOr };
-	}
-
-	$: updateSyncExplanationData(myProjectsOptions);
-
-	function getMyProjectsOptions() {
-		return projects.reduce((obj, item) => {
-			obj[item.id] = item.name;
-			return obj;
-		}, {});
-	}
 	function handleSyncTagChange(value: string) {
 		syncTag = value;
 		settingsStore.update((s) => ({ ...s, SyncTag: value }));
@@ -87,13 +28,7 @@
 		}, 800);
 	}
 	onMount(async () => {
-		projects = await plugin.service.getProjects?.() ?? [];
-		myProjectsOptions = getMyProjectsOptions();
-		selectedSyncProject = $settingsStore.SyncProject ?? '';
-		defaultProjectId = $settingsStore.defaultProjectId ?? '';
-		tagAndOr = $settingsStore.tagAndOr ?? 1;
 		syncTag = $settingsStore.SyncTag ?? '';
-		updateSyncExplanationData(myProjectsOptions);
 	});
 </script>
 
@@ -105,51 +40,8 @@
 >
 	<div class="setting-item-description">
 		To limit the tasks TickTickSync will synchronize from TickTick to
-		Obsidian select a tag and/or project(list) below. If a tag is entered, only tasks with that tag will be
-		synchronized. If a project(list) is selected, only tasks in that project will be synchronized. If
-		both are chosen the behavior will be determined by your settings. See result below.
-	</div>
-
-	<div class="setting-item">
-		<div class="setting-item-info">
-			<div class="setting-item-name">Project</div>
-			<div class="setting-item-description">Only tasks in this project will be synchronized.</div>
-		</div>
-		<div class="setting-item-control">
-			<select
-				class="dropdown"
-				id="sync-project"
-				bind:value={selectedSyncProject}
-				on:change={(e: Event) => {
-				handleSyncProjectChange((e.target as HTMLSelectElement).value);
-				updateSyncExplanationData(myProjectsOptions);}}
-			>
-				<option value="">(none)</option>
-				{#each Object.entries(myProjectsOptions) as [id, name]}
-					<option value={id}>{name}</option>
-				{/each}
-			</select>
-		</div>
-	</div>
-	<div class="setting-item">
-		<div class="setting-item-info">
-			<div class="setting-item-name">Tag Behavior</div>
-			<div class="setting-item-description">Determine how Tags will be handled.</div>
-		</div>
-		<div class="setting-item-control">
-			<select
-				class="dropdown"
-				id="tag-and-or"
-				bind:value={tagAndOrString}
-				on:change={(e: Event) => {
-				handleTagAndOrChange((e.target as HTMLSelectElement).value);
-				updateSyncExplanationData(myProjectsOptions);}}
-			>
-				{#each Object.entries(TAGS_BEHAVIOR) as [num, label]}
-					<option value={num}>{label}</option>
-				{/each}
-			</select>
-		</div>
+		Obsidian, enter a tag below. If a tag is entered, only tasks with
+		that tag will be synchronized.
 	</div>
 
 	<div class="setting-item">
@@ -164,29 +56,16 @@
 				bind:value={syncTag}
 				placeholder="Only tasks with this tag will be synced"
 				on:input={(e: Event) => {
-					handleSyncTagChange((e.target as HTMLInputElement).value);
-					updateSyncExplanationData(myProjectsOptions);}}
+					handleSyncTagChange((e.target as HTMLInputElement).value);}}
 			/>
 		</div>
 	</div>
-	<!-- In your relevant markup location: -->
+
 	<div class="sync-explanation">
-		{#if !syncExplanationData.project && !syncExplanationData.tag}
+		{#if !syncTag}
 			<p>No limitation.</p>
-		{:else if syncExplanationData.project && !syncExplanationData.tag}
-			<p>Only Tasks in <b>{syncExplanationData.project}</b> will be synchronized</p>
-		{:else if !syncExplanationData.project && syncExplanationData.tag}
-			<p>Only Tasks tagged with <b>#{syncExplanationData.tag}</b> tag will be synchronized</p>
-		{:else if syncExplanationData.andOr}
-			<p>
-				Only tasks in <b>{syncExplanationData.project}</b> AND tagged with <b>#{syncExplanationData.tag}</b> tag
-				will be synchronized
-			</p>
 		{:else}
-			<p>
-				All tasks in <b>{syncExplanationData.project}</b> will be synchronized. All tasks tagged with
-				<b>#{syncExplanationData.tag}</b> tag will be synchronized
-			</p>
+			<p>Only tasks tagged with <b>#{syncTag}</b> will be synchronized</p>
 		{/if}
 	</div>
 

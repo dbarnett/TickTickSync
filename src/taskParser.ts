@@ -1,4 +1,4 @@
-import { type App, Notice } from 'obsidian';
+import { type App } from 'obsidian';
 import type TickTickSync from '@/main';
 import type { ITask, ITaskItem } from '@/api/types/Task';
 import { getSettings } from '@/settings';
@@ -385,27 +385,14 @@ export class TaskParser {
 			tags = rawTags.map(raw => raw.toLowerCase().replace(/[/\s]+/g, '-').replace(/-+/g, '-'));
 		}
 
-		let projectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(filepath);
+		// New tasks always go to the account default project (Inbox), never
+		// inferred from the file or a tag -- Project is never something
+		// Obsidian gets to decide. Subtasks are the one exception: TickTick
+		// requires a subtask to share its parent's project.
+		let projectId = getSettings().defaultProjectId || getSettings().inboxID;
 
-		if (hasParent) {
-			if (parentTaskObject) {
-				projectId = parentTaskObject.projectId;
-			}
-		} else {
-			//Check if we need to add this to a specific project by tag.
-			// Use rawTags (pre-resolution) so underscores are preserved for matching
-			if (rawTags) {
-				for (const rawTag of rawTags) {
-					const labelName = rawTag.replace(/[/_]/g, ' ');
-
-					const hasProjectId = (await getAllProjects()).find(obj => obj.name.toLowerCase() === labelName.toLowerCase())?.id;
-					if (!hasProjectId) {
-						continue;
-					}
-					projectId = hasProjectId;
-					break;
-				}
-			}
+		if (hasParent && parentTaskObject) {
+			projectId = parentTaskObject.projectId;
 		}
 
 		const title = this.getTaskContentFromLineText(textWithoutIndentation);
@@ -704,31 +691,6 @@ export class TaskParser {
 
 	}
 
-
-	//task project id compare
-	async isProjectIdChanged(lineTask: ITask, TickTickTask: ITask) {
-		if (lineTask.projectId !== TickTickTask.projectId) {
-			log.debug('Project ID changed: ', lineTask.projectId, TickTickTask.projectId);
-			//make sure that they're not in a non-project file.
-			const taskFile = await this.plugin.fileMetadataService.getFilepathForTask(TickTickTask.id);
-			if (taskFile) {
-				// log.debug('Task file: ', taskFile);
-				const hasADefaultProject = await this.plugin.fileTaskQueries.filepathHasDefaultProjectID(taskFile)
-				if (hasADefaultProject) {
-					return true;
-				} else {
-					log.debug('Task file does not have a default project: ', taskFile);
-					//hate to do a notification from here, but I don't want to blindside them either.
-					new Notice(`Task ${TickTickTask.title} was moved in TickTick, but is in ${taskFile}. Assuming that this is intentional and not moving it.`, 10000	);
-
-					return false;
-				}
-
-			}
-		} else {
-			return false;
-		}
-	}
 
 	//Determine whether the task is indented
 	isIndentedTask(text: string) {
