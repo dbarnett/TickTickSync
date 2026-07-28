@@ -206,6 +206,13 @@ export class TaskParser {
 		return result.trim();
 	}
 
+	// Same detection heuristic stripOBSUrl uses to find/remove the link --
+	// mirrored here so isTitleChanged can ask "does this title still have
+	// its Obsidian link" without stripping it.
+	hasOBSUrl(title: string): boolean {
+		return !!title && title.lastIndexOf('.md)') > 0;
+	}
+
 	//Remove Extraneous data from line.
 	getTaskContentFromLineText(lineText: string) {
 		let taskContent = lineText.replace(REGEX.TASK_CONTENT.REMOVE_INLINE_METADATA, '')
@@ -307,7 +314,14 @@ export class TaskParser {
 
 		let timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-		const rawTags = this.getAllTagsFromLineText(textWithoutIndentation);
+		// The #ticktick tag is Obsidian-side control signal (marks this line
+		// as plugin-tracked) -- it's not a real tag and must never be sent
+		// to TickTick as one. Excluded here so it never flows into task.tags
+		// for creation, comparison, or update; see TaskModificationDetector
+		// for the separate step that preserves a *genuinely* TT-side
+		// "ticktick" tag if one already exists there independently.
+		const rawTags = this.getAllTagsFromLineText(textWithoutIndentation)
+			.filter(t => t.toLowerCase() !== 'ticktick');
 
 		// Resolve tags: handle hierarchy and create unknown tags in TickTick
 		const tagSvc = this.plugin?.tagService;
@@ -643,8 +657,23 @@ export class TaskParser {
 		const lineTaskTitle = this.stripOBSUrl(lineTask.title);
 		const TickTickTaskTitle = this.stripOBSUrl(TickTickTask.title);
 		//Whether content is modified?
-		const contentModified = (lineTaskTitle.trim() === TickTickTaskTitle.trim());
-		return (!contentModified);
+		const contentMatches = (lineTaskTitle.trim() === TickTickTaskTitle.trim());
+		if (!contentMatches) {
+			return true;
+		}
+
+		// Content matches once the link is stripped from both sides -- but
+		// if a link is supposed to be embedded in the TickTick title and
+		// this task's TT-side title doesn't have one (e.g. stripped via a
+		// direct API edit), that's invisible to the check above since it
+		// only compares content-minus-link. Treat a missing expected link
+		// as a change too, so it gets repaired instead of staying wrong on
+		// every future sync.
+		if (getSettings().fileLinksInTickTick === 'taskLink' && !this.hasOBSUrl(TickTickTask.title)) {
+			return true;
+		}
+
+		return false;
 	}
 
 	//tag compare

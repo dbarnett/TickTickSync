@@ -259,6 +259,30 @@ export class TaskModificationDetector {
 		// Convert line to task object
 		const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
 
+		// convertLineToTask never includes the "ticktick" control tag in
+		// lineTask.tags (it's an Obsidian-side signal, not a real TT tag).
+		// If TickTick already independently has a genuine "ticktick" tag on
+		// this task (per our last-known state), preserve it here so
+		// comparisons/updates don't silently strip it -- we should never
+		// actively add or remove it, only leave whatever's already there.
+		if (savedTask.tags?.some(t => t.toLowerCase() === 'ticktick') &&
+			!lineTask.tags?.some(t => t.toLowerCase() === 'ticktick')) {
+			lineTask.tags = [...(lineTask.tags || []), 'ticktick'];
+		}
+
+		// Parent detection is indentation-based within the current file's
+		// fileMap. When a task's line moves to a different vault file (with
+		// no parent line alongside it), lineTask.parentId legitimately comes
+		// back empty for that file's context -- that's an artifact of the
+		// move, not the user intentionally removing the parent. Preserve the
+		// last-known parentId in that specific case; a same-file dedent
+		// (genuine intentional un-parenting) is untouched since this only
+		// fires when the file itself changed.
+		const moveCheckForParent = await this.checkForTaskMove(taskId, filepath!);
+		if (moveCheckForParent.moved && !lineTask.parentId && savedTask.parentId) {
+			lineTask.parentId = savedTask.parentId;
+		}
+
 		// Ensure task has required fields
 		if (!savedTask.dateHolder) {
 			this.plugin.dateMan?.addDateHolderToTask(savedTask, undefined);
