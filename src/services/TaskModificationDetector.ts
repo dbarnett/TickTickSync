@@ -538,10 +538,36 @@ export class TaskModificationDetector {
 			if (!modifications.remindersModified) {
 				this.plugin.taskParser?.preserveReminders(lineTask, savedTask);
 			}
-			if (!lineTask.repeatFlag && savedTask.repeatFlag) {
-				lineTask.repeatFlag = savedTask.repeatFlag;
+
+			// TicktickRestAPI.updateTask() sends a whole task object -- the
+			// underlying API wrapper resets any field not present back to a
+			// hardcoded default rather than leaving it alone (src/api/index.ts
+			// updateTask()), so omitting untouched fields is not an option.
+			// Instead, fetch the live server task and overlay only the fields
+			// this sync cycle actually flagged as changed, so untouched fields
+			// reflect current TickTick state rather than a possibly-stale
+			// local (savedTask) snapshot -- see docs/sync-logic.md.
+			const serverTask = await this.plugin.tickTickRestAPI?.getTaskById(taskId, lineTask.projectId) ?? savedTask;
+			const mergedTask: ITask = { ...serverTask, id: lineTask.id, projectId: lineTask.projectId };
+			if (modifications.titleModified) mergedTask.title = lineTask.title;
+			if (modifications.tagsModified) mergedTask.tags = lineTask.tags;
+			if (modifications.datesModified) {
+				mergedTask.dueDate = lineTask.dueDate;
+				mergedTask.startDate = lineTask.startDate;
+				mergedTask.isAllDay = lineTask.isAllDay;
+				mergedTask.timeZone = lineTask.timeZone;
 			}
-			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(lineTask) as ITask;
+			if (modifications.parentIdModified) mergedTask.parentId = lineTask.parentId;
+			if (modifications.priorityModified) mergedTask.priority = lineTask.priority;
+			if (modifications.taskItemsModified) mergedTask.items = lineTask.items;
+			if (modifications.notesModified) {
+				mergedTask.content = lineTask.content;
+				mergedTask.desc = lineTask.desc;
+			}
+			if (modifications.repeatFlagModified) mergedTask.repeatFlag = lineTask.repeatFlag;
+			mergedTask.reminders = lineTask.reminders;
+
+			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(mergedTask) as ITask;
 			updatedTask.dateHolder = saveDateHolder;
 			updatedTask.lineHash = newHash;
 
