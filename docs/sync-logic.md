@@ -65,19 +65,21 @@ Key properties:
   pull is a full or incremental fetch — doesn't affect per-task conflict
   logic, only which tasks get considered.
 
-## Push path: field-diff triggered, no staleness check (current gap)
+## Push path: field-diff triggered, no staleness check
 
 `src/services/TaskModificationDetector.ts` (`checkLineForModifications`
 → `detectModifications` → `applyModifications`), API call in
 `src/services/TicktickRestAPI.ts` (`updateTask`).
 
+### Current behavior
+
 ```mermaid
 sequenceDiagram
-    participant Editor as Obsidian editor
-    participant TMD as TaskModificationDetector
-    participant Dexie as db.tasks (savedTask)
-    participant API as TicktickRestAPI.updateTask()
-    participant TT as TickTick API
+    participant Editor as 📝 Obsidian editor
+    participant TMD as 🔍 TaskModificationDetector
+    participant Dexie as 💾 db.tasks (savedTask)
+    participant API as 📤 TicktickRestAPI.updateTask()
+    participant TT as ☁️ TickTick API
 
     Editor->>TMD: line edited
     TMD->>TMD: parse line → lineTask (ALL fields, fresh from line text)
@@ -96,6 +98,63 @@ a task's priority got silently reverted — both because an unrelated
 field edit (or a routine resync) triggered a full-object push that
 carried a stale `status`/`priority` value along for the ride, clobbering
 a TT-side change the plugin hadn't pulled down yet.
+
+### 🎯 Target fix
+
+Scoped to the push path only. **Not a partial/omitted-fields payload —
+that approach is broken here.** `src/api/index.ts` `Tick.updateTask()`
+(the wrapper `TicktickRestAPI.updateTask()` calls) builds its outgoing
+object field-by-field as `jsonOptions.field ? val : HARDCODED_DEFAULT`
+— an *omitted* field isn't left alone, it's reset to a blank default
+(`status: 0`, `priority: 0`, `tags: []`, `parentId: null`, ...) before
+the request is even sent. Omitting untouched fields would make the
+clobbering worse, not better.
+
+Instead: fetch the current server task fresh (`getTaskById`) immediately
+before pushing, then merge only the fields `detectModifications`
+flagged as changed from `lineTask` onto that live server state, and
+send the merged *whole* object. This still satisfies the wrapper's
+full-object construction, but every untouched field reflects true
+current TT state instead of a stale local (`savedTask`) snapshot.
+
+```mermaid
+sequenceDiagram
+    participant Editor as 📝 Obsidian editor
+    participant TMD as 🔍 TaskModificationDetector
+    participant Dexie as 💾 db.tasks (savedTask)
+    participant API as 📤 TicktickRestAPI.updateTask()
+    participant TT as ☁️ TickTick API
+
+    Editor->>TMD: line edited
+    TMD->>TMD: parse line → lineTask (all fields)
+    TMD->>Dexie: load savedTask (last-known-synced snapshot)
+    TMD->>TMD: detectModifications(lineTask, savedTask)<br/>→ per-field flags (titleModified, statusModified, ...)
+    alt ✏️ any flag true (hasContentChanges)
+        TMD->>TT: 🔄 getTaskById() — fetch live server state first
+        TT-->>TMD: serverTask (current truth, may include<br/>changes not yet pulled)
+        TMD->>TMD: 🎯 merged = serverTask, overlaid with<br/>only fields where flag == true
+        TMD->>API: updateTask(merged) — still a whole object
+        API->>TT: full payload, but untouched fields<br/>carry live server values, not stale local ones
+        Note over API,TT: ✅ A field TT changed but hasn't been<br/>pulled down yet survives, because the<br/>base for the merge IS that live change.<br/>⚠️ One extra API round-trip per push —<br/>acceptable, pushes are user-edit-triggered,<br/>not high frequency.
+    end
+```
+
+**What this closes:** the 💥 row in the corner-cases table below — an
+unrelated field edit can no longer clobber a stale field.
+
+**Same fix applied a second place:** `TicktickRestAPI.moveTaskProject()`
+has its own follow-up `updateTask()` call (a project-move triggers a
+second, "redundant but TickTick does it" whole-object push) that had
+the identical bug — sending the raw, unmerged task. Fixed the same way:
+fetch live server state, override only `projectId`, send that merged.
+
+**What this does NOT close** (deliberately out of scope for now): the
+narrower ⚖️ same-field-both-sides-within-one-interval race, also in the
+table below. That's bounded by the sync interval and much smaller in
+practice once the merge-onto-live-state fix lands — true general
+per-field conflict resolution (timestamp comparison or a user-facing
+resolution prompt) is future work if that gap ever proves to matter,
+not part of this fix.
 
 ## Corner cases (current behavior)
 
