@@ -41,7 +41,7 @@ flowchart TD
     B -- "🆕 no, new task" --> C[✅ No conflict —<br/>write remote as-is]
     B -- "📎 yes, local copy found" --> D{🔁 Echo check:<br/>local.lastModifiedByDeviceId == this device<br/>AND local.task.modifiedTime == remote.modifiedTime?}
     D -- "🔁 yes, this is our own echo" --> E[⏭️ Skip —<br/>just-pushed change bouncing back]
-    D -- "❌ no, genuinely new remote state" --> F{⚖️ local.updatedAt >= remote.modifiedTime?}
+    D -- "❌ no, genuinely new remote state" --> F{⚖️ local.task.modifiedTime >=<br/>remote.task.modifiedTime?}
     F -- "🏠 yes, local is newer/tied" --> G[🏠 Local wins — conflictDetected=true<br/>keep local task object entirely]
     F -- "☁️ no, remote is newer" --> H[☁️ Remote wins — conflictDetected=true<br/>overwrite with remote task object entirely]
     G --> I[💾 bulkPut resolved task to db.tasks]
@@ -58,6 +58,18 @@ Key properties:
 - **Echo suppression** exists specifically so a device doesn't
   immediately re-pull-and-conflict against the change it just pushed
   itself, before TT's `modifiedTime` has had a chance to diverge.
+- **The winner check compares TickTick's own `modifiedTime` on both
+  sides, not the plugin's internal `updatedAt` bookkeeping field.**
+  `updatedAt` gets bumped to `Date.now()` by several paths that aren't a
+  real edit (a no-op hash-only resync in `TaskModificationDetector`, a
+  vault rewrite triggered by a *previous* pull) — using it here let
+  stale local bookkeeping outrank a genuinely newer remote change. Fixed
+  2026-07-31 after a live repro: a dueDate-only change made directly on
+  TickTick never made it into the vault line, because a task this
+  session had touched earlier that day already had an inflated
+  `updatedAt` that outranked the fresh remote timestamp. `task.modifiedTime`
+  only changes via a real pull or a push's API-ack response, so it's the
+  reliable signal — same one echo suppression above already uses.
 - Deletions are handled separately (below the conflict-resolution block
   in `pull.ts`) — a TT-reported deletion just sets `local.deleted = true`
   unconditionally, no conflict check against local edits.
@@ -163,5 +175,6 @@ not part of this fix.
 | ✅ Same device re-pulls its own just-pushed change | Echo-suppressed on pull (skipped) — works correctly. |
 | 💥 TT-side field change not yet pulled, unrelated field edited locally | **Not handled.** Push sends the whole `lineTask`, silently overwriting the un-pulled TT change. See "Target fix" under the push-path section above. |
 | ⚖️ Local edit and remote edit to the *same* field, both within one sync interval | Pull's LWW resolves it by `updatedAt`/`modifiedTime` comparison — correct in the sense that "most recent wins", but still whole-task granularity, so an unrelated field on the losing side can be lost too. |
+| ✅ Plain remote-only field change (e.g. dueDate edited directly on TickTick) not reflected in the vault | Fixed — pull's winner check now compares `task.modifiedTime` on both sides instead of internal `updatedAt` bookkeeping, see "Key properties" above. |
 | 🗑️ TT reports a task deleted | Local `deleted` flag set unconditionally, no check against pending local edits to that task. |
 | 🔄 Full vs. delta sync | Only affects which tasks are considered for pull, not the conflict-resolution decision itself. |
