@@ -509,10 +509,17 @@ export class TaskModificationDetector {
 			this.notifyUserOfChanges(taskId, modifications);
 		}
 
-		// Update hash even if no API call was made
+		// Update hash even if no API call was made. Store it on savedTask, not
+		// lineTask -- lineTask is a fresh reconstruction from the vault line
+		// whose modifiedTime is always stamped to "now" at parse time
+		// (taskParser.ts convertLineToTask), regardless of whether anything
+		// real changed. Writing that in here would silently corrupt this
+		// task's last-known TT modifiedTime on every no-op hash resync,
+		// which conflicts.ts's resolveTaskConflict relies on being accurate
+		// to correctly let a later genuine remote change win a future pull.
 		if (!modified && newHash !== savedTask.lineHash) {
-			lineTask.lineHash = newHash;
-			await this.plugin.taskRepository.upsertTask(lineTask, undefined, Date.now());
+			savedTask.lineHash = newHash;
+			await this.plugin.taskRepository.upsertTask(savedTask, undefined, Date.now());
 		}
 
 		return modified;
