@@ -25,6 +25,7 @@ import type { LocalTask } from '@/db/schema';
 import { NewFileMap, type ITaskItemRecord, type ITaskRecord } from '@/services/NewFileMap';
 import { FolderSyncService } from '@/services/FolderSyncService';
 import { getSettings } from '@/settings';
+import { consumeRemoteChanged } from '@/sync/conflictTracking';
 import log from '@/utils/logger';
 import ObjectID from 'bson-objectid';
 import { normalizeRepeatFlag } from '@/utils/RecurrenceConverter';
@@ -415,6 +416,29 @@ export class TaskModificationDetector {
 	): Promise<boolean> {
 		let modified = false;
 
+		// Simultaneous-edit check: did TickTick change one of the same
+		// fields Obsidian is about to push, during this same sync cycle's
+		// pull? If so this isn't "Obsidian edited it," it's a genuine
+		// collision, and blindly pushing Obsidian's copy silently discards
+		// whatever changed on TickTick's side. We still push (no merge logic
+		// here to pick a winner) but surface it loudly rather than let it
+		// happen silently -- see conflictTracking.ts.
+		const remoteChangedFields = consumeRemoteChanged(taskId);
+		if (remoteChangedFields && remoteChangedFields.size > 0) {
+			const pushingFields = [
+				modifications.titleModified && 'title',
+				modifications.priorityModified && 'priority',
+				modifications.statusModified && 'status',
+				modifications.datesModified && (remoteChangedFields.has('dueDate') ? 'dueDate' : remoteChangedFields.has('startDate') ? 'startDate' : undefined),
+			].filter((f): f is string => !!f);
+			const collidingFields = pushingFields.filter(f => remoteChangedFields.has(f));
+			if (collidingFields.length > 0) {
+				const message = `TickTickSync: "${lineTask.title}" was edited on both TickTick and in Obsidian since the last sync (${collidingFields.join(', ')}). Keeping the Obsidian version -- check TickTick if that's not what you wanted.`;
+				log.warn(message);
+				new Notice(message, 10000);
+			}
+		}
+
 		// Preserve timezone
 		lineTask.timeZone = savedTask.timeZone;
 
@@ -446,20 +470,35 @@ export class TaskModificationDetector {
 		if (this.hasContentChanges(modifications)) {
 			savedTask.modifiedTime = this.plugin.dateMan?.formatDateToISO(new Date());
 			const saveDateHolder = lineTask.dateHolder;
-			// Preserve reminder fields from saved task when line task lacks them
-			if ((!lineTask.reminders || lineTask.reminders.length === 0) && savedTask.reminders?.length) {
-				lineTask.reminders = savedTask.reminders;
+
+			// TicktickRestAPI.updateTask() sends a whole task object -- the
+			// underlying API wrapper resets any field not present back to a
+			// hardcoded default rather than leaving it alone (src/api/index.ts
+			// updateTask()), so omitting untouched fields is not an option.
+			// Instead, fetch the live server task and overlay only the fields
+			// this sync cycle actually flagged as changed, so untouched fields
+			// reflect current TickTick state rather than a possibly-stale
+			// local (savedTask) snapshot -- see docs/sync-logic.md.
+			const serverTask = await this.plugin.tickTickRestAPI?.getTaskById(taskId, lineTask.projectId) ?? savedTask;
+			const mergedTask: ITask = { ...serverTask, id: lineTask.id, projectId: lineTask.projectId };
+			if (modifications.titleModified) mergedTask.title = lineTask.title;
+			if (modifications.tagsModified) mergedTask.tags = lineTask.tags;
+			if (modifications.datesModified) {
+				mergedTask.dueDate = lineTask.dueDate;
+				mergedTask.startDate = lineTask.startDate;
+				mergedTask.isAllDay = lineTask.isAllDay;
+				mergedTask.timeZone = lineTask.timeZone;
 			}
-			if (!lineTask.reminder && savedTask.reminder) {
-				lineTask.reminder = savedTask.reminder;
+			if (modifications.parentIdModified) mergedTask.parentId = lineTask.parentId;
+			if (modifications.priorityModified) mergedTask.priority = lineTask.priority;
+			if (modifications.taskItemsModified) mergedTask.items = lineTask.items;
+			if (modifications.notesModified) {
+				mergedTask.content = lineTask.content;
+				mergedTask.desc = lineTask.desc;
 			}
-			if (!lineTask.remindTime && savedTask.remindTime) {
-				lineTask.remindTime = savedTask.remindTime;
-			}
-			if (!lineTask.repeatFlag && savedTask.repeatFlag) {
-				lineTask.repeatFlag = savedTask.repeatFlag;
-			}
-			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(lineTask) as ITask;
+			if (modifications.repeatFlagModified) mergedTask.repeatFlag = lineTask.repeatFlag;
+
+			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(mergedTask) as ITask;
 			updatedTask.dateHolder = saveDateHolder;
 			updatedTask.lineHash = newHash;
 
