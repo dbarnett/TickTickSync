@@ -662,15 +662,20 @@ export class TaskParser {
 			return true;
 		}
 
-		// Content matches once the link is stripped from both sides -- but
-		// if a link is supposed to be embedded in the TickTick title and
-		// this task's TT-side title doesn't have one (e.g. stripped via a
-		// direct API edit), that's invisible to the check above since it
-		// only compares content-minus-link. Treat a missing expected link
-		// as a change too, so it gets repaired instead of staying wrong on
-		// every future sync.
-		if (getSettings().fileLinksInTickTick === 'taskLink' && !this.hasOBSUrl(TickTickTask.title)) {
-			return true;
+		// Content matches once the link is stripped from both sides -- but a
+		// change to the link itself (missing entirely, or present but stale/
+		// wrong, e.g. after a file move) is invisible to that check since it
+		// only compares content-minus-link. lineTask.title already carries
+		// the correct current link (computed fresh from this file's path),
+		// so compare the raw, unstripped titles too: any mismatch there
+		// means the TT-side link needs repairing, not just "is one present."
+		if (getSettings().fileLinksInTickTick === 'taskLink') {
+			if (!this.hasOBSUrl(TickTickTask.title)) {
+				return true;
+			}
+			if (lineTask.title.trim() !== TickTickTask.title.trim()) {
+				return true;
+			}
 		}
 
 		return false;
