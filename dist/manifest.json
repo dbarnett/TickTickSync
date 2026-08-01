@@ -1,11 +1,11 @@
 {
 	"id": "tickticksync",
-	"name": "TickTickSync",
-	"version": "2.0.1",
+	"name": "TickTickSync (dbarnett fork, ALPHA)",
+	"version": "2.1.2-alpha",
 	"minAppVersion": "1.12.7",
-	"description": "Sync TickTick tasks to Obsidian, and Obsidian tasks to TickTick",
-	"author": "thesamim",
-	"authorUrl": "https://github.com/thesamim",
+	"description": "ALPHA personal fork of TickTickSync (github.com/dbarnett/TickTickSync, alpha branch) with a much lighter-touch sync model: never changes TickTick Project from Obsidian, never auto-materializes untracked tasks into vault notes, no auto tag/project churn. Not affiliated with or endorsed by the original author.",
+	"author": "thesamim, forked by dbarnett",
+	"authorUrl": "https://github.com/dbarnett/TickTickSync",
 	"isDesktopOnly": false,
 	"fundingUrl": "https://ko-fi.com/thesamim"
 }
