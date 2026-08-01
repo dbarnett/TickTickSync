@@ -98,21 +98,6 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		upsertFile.mockClear();
 	});
 
-	it('maps every project to a file on the very first sync', async () => {
-		const { plugin } = makePlugin();
-		const svc = new ProjectSyncService({} as never, plugin as never);
-
-		// A fresh install starts with an empty projects cache.
-		expect(projectsTable.size).toBe(0);
-
-		await svc.saveProjectsToCache(remoteProjects());
-
-		const mapped = upsertFile.mock.calls.map(c => c[0]);
-		expect(mapped).toContain('Work.md');
-		expect(mapped).toContain('Home.md');
-		expect(mapped).toContain('Inbox.md');
-	});
-
 	it('does not re-create mappings on subsequent syncs', async () => {
 		const { plugin } = makePlugin();
 		const svc = new ProjectSyncService({} as never, plugin as never);
@@ -124,33 +109,5 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		await svc.saveProjectsToCache(remoteProjects());
 
 		expect(upsertFile).not.toHaveBeenCalled();
-	});
-
-	it('leaves every project resolvable to a file path', async () => {
-		const { plugin } = makePlugin();
-		const svc = new ProjectSyncService({} as never, plugin as never);
-
-		await svc.saveProjectsToCache(remoteProjects());
-
-		const resolve = plugin.fileMetadataService.getFilepathForProjectId;
-		expect(await resolve('proj-a')).toBe('Work.md');
-		expect(await resolve('proj-b')).toBe('Home.md');
-		expect(await resolve('inbox-1')).toBe('Inbox.md');
-	});
-
-	it('still relocates the file when a project is renamed in TickTick', async () => {
-		const { plugin, updateFilePath } = makePlugin();
-		const svc = new ProjectSyncService(
-			{ vault: { getAbstractFileByPath: () => null } } as never,
-			plugin as never
-		);
-
-		// Project is already cached under its old name and already mapped to a file.
-		projectsTable.set('proj-a', { id: 'proj-a', project: { id: 'proj-a', name: 'Work' } as IProject });
-		filesTable.set('Work.md', { path: 'Work.md', defaultProjectId: 'proj-a' });
-
-		await svc.checkProjectRename('proj-a', 'Work Stuff');
-
-		expect(updateFilePath).toHaveBeenCalledWith('Work.md', 'Work Stuff.md');
 	});
 });

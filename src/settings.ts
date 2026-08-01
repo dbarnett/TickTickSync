@@ -15,8 +15,6 @@ export interface ITickTickSyncSettings {
 
 	automaticSynchronizationInterval: number;
 	enableFullVaultSync: boolean;
-	tagAndOr: number; // 1 == And ; 2 == Or
-	SyncProject: string;
 	SyncTag: string;
 	defaultProjectId: string;
 	defaultProjectName: string;
@@ -56,12 +54,10 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	baseURL: 'ticktick.com',
 	automaticSynchronizationInterval: 300, //default sync interval 300s
 	enableFullVaultSync: false,
-	tagAndOr: 1,
 	debugMode: false,
 	logLevel: 'info',
 	journalRetentionDays: 3,
 	deletedTaskRetentionDays: 7,
-	SyncProject: '',
 	SyncTag: '',
 	defaultProjectId: '',
 	defaultProjectName: 'Inbox',

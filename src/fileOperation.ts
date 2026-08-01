@@ -490,7 +490,6 @@ export class FileOperation {
 		log.debug('Processing File: ', file.path);
 		const fileMap = new NewFileMap(this.app, this.plugin, file);
 		await fileMap.init();
-		let bTaskMove: boolean = false;
 
 
 		// log.debug('================');
@@ -526,27 +525,13 @@ export class FileOperation {
 				const oldTask = await this.plugin.taskRepository.loadTaskById(task.id);
 				this.plugin.dateMan?.addDateHolderToTask(task, oldTask);
 				if (oldTask) {
-					// Compare incoming task (from DB/TickTick) with current vault state
-					const vaultProjectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(file.path);
+					// A TickTick-side project change never moves the task's
+					// vault file -- Project is TickTick metadata only here.
+					// Just update fields (including parentId) in place.
 					const vaultParentId = fileMap.getParentId(task.id);
-					const vaultTask: ITask = { ...task, projectId: vaultProjectId ?? '', parentId: vaultParentId ?? '' };
-
-					//Only check for Project/Parent change if task is in cache.
-					if ((await this.plugin.taskParser?.isProjectIdChanged(vaultTask, task))) {
-						log.debug('Moving Task: ', task.id, task.title, ' from Project: ', vaultTask.projectId, ' to Project: ', task.projectId);
-						filePath = await this.handleTickTickStructureMove(task, vaultTask, lineText, fileMap);
-						//because we need to update the OBS URL in TT and fix up the cache.
-						bTaskMove = true;
-
-						// Check if project groups differ and move file if necessary
-						const localTaskRecord = await this.plugin.taskRepository.loadLocalTaskById(task.id);
-						if (localTaskRecord) {
-							await this.plugin.taskModificationDetector?.checkForProjectGroupChange(task, localTaskRecord);
-						}
-					} else {
-						const bParentUpdate = this.plugin.taskParser?.isParentIdChanged(vaultTask, task);
-						fileMap.updateTask(task, lineText, bParentUpdate);
-					}
+					const vaultTask: ITask = { ...task, parentId: vaultParentId ?? '' };
+					const bParentUpdate = this.plugin.taskParser?.isParentIdChanged(vaultTask, task);
+					fileMap.updateTask(task, lineText, bParentUpdate);
 				} else {
 					//how would that happen????
 					log.warn('No Old Task found for: ', task.id);
@@ -585,15 +570,8 @@ export class FileOperation {
 				addedTask.lineHash = lineHash;
 				await this.plugin.taskRepository.upsertTask(addedTask, file.path, Date.now());
 			} else {
-				if (!bTaskMove) {
-					task.lineHash = lineHash;
-					await this.plugin.taskRepository.upsertTask(task, file.path, Date.now());
-				} else {
-					task.lineHash = lineHash;
-					let addedTask = (await this.plugin.tickTickRestAPI?.updateTask(task))!;
-					await this.plugin.taskRepository.upsertTask(addedTask, filePath, Date.now());
-				}
-
+				task.lineHash = lineHash;
+				await this.plugin.taskRepository.upsertTask(task, file.path, Date.now());
 			}
 		}
 
@@ -616,67 +594,6 @@ export class FileOperation {
 		const myModal = new TaskDeletionModal(this.app, items, reason, (result) => {
 		});
 		return await myModal.showModal();
-	}
-
-
-	//Just the notification now.
-	private async handleTickTickStructureMove(newTask: ITask, oldTask: ITask, lineText: string, fileMap: NewFileMap) {
-		log.debug('deleting old task: ', oldTask.id, oldTask.title, ' from file');
-		let filePathForNewProject = await this.plugin.fileMetadataService?.getFilepathForProjectId(newTask.projectId);
-		if (!filePathForNewProject) {
-			let errmsg = `File not found for moved newTask:  ${newTask.id}, ${newTask.title}`;
-			throw new Error(errmsg);
-		}
-		const tFilePathForProject = await this.plugin.fileOperation.getOrCreateDefaultFile(filePathForNewProject, newTask.projectId);
-		if (!tFilePathForProject || (!(tFilePathForProject instanceof TFile))) {
-			let errmsg = `File not found for moved newTask:  ${newTask.id}, ${newTask.title}, ${filePathForNewProject}`;
-			throw new Error(errmsg);
-		}
-		log.debug('oldFilePath: ', fileMap.getFilePath());
-		if (!fileMap || !fileMap.getFilePath()) {
-			let errmsg = `File not found for moved newTask:  ${newTask.id}, ${newTask.title}`;
-			throw new Error(errmsg);
-		}
-		fileMap.deleteTask(oldTask.id);
-		log.debug('deleted from: ', fileMap.getFilePath());
-
-		await this.plugin.taskRepository.deleteTask(oldTask.id);
-
-		const destFileMap = new NewFileMap(this.app, this.plugin, tFilePathForProject);
-		await destFileMap.init();
-		//insert into the new file.
-		log.debug('Adding Task: ', newTask.id, newTask.title, ' to new file: ', destFileMap.getFilePath());
-		destFileMap.addTask(newTask, lineText);
-		const newData = destFileMap.getFileLines();
-		await this.app.vault.process(tFilePathForProject, (data) => {
-			data = newData;
-			return data;
-		});
-
-		//task is updated to cache in the caller....!
-
-
-		const cleanTitle = this.plugin.taskParser?.stripOBSUrl(newTask.title);
-		let message = '';
-		if (newTask.projectId != oldTask.projectId) {
-			const newProject = newTask.projectId ? await db.projects.get(newTask.projectId) : undefined;
-			const oldProject = oldTask.projectId ? await db.projects.get(oldTask.projectId) : undefined;
-			const newProjectName = newProject?.project?.name || 'Unknown Project';
-			const oldProjectName = oldProject?.project?.name || 'Unknown Project';
-			message = 'Task Moved.\nTask: ' + cleanTitle + '\nwas moved from\n ' + oldProjectName + '\nto\n' + newProjectName;
-		} else {
-			if (newTask.parentId) {
-				const parentTask = (await this.plugin.taskRepository.loadTaskById(newTask.parentId))!;
-				const cleanParentTaskTitle = this.plugin.taskParser?.stripOBSUrl(parentTask.title);
-				message = 'Task has new Parent.\nTask: ' + cleanTitle + '\nis now a child of\n ' + cleanParentTaskTitle;
-			} else {
-				message = 'Task is now a top level task.\nTask: ' + cleanTitle;
-			}
-		}
-
-		new Notice(message, 5000);
-		return filePathForNewProject;
-
 	}
 
 
