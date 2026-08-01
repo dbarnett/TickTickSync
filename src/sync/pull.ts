@@ -97,11 +97,17 @@ export async function pullFromTickTick(
 
 		const { resolved, conflictDetected, winner } = resolveTaskConflict(local, remoteLocalTask);
 		if (conflictDetected) {
+			// modifiedTime is the actual decision basis (see resolveTaskConflict) --
+			// logging updatedAt here would show numbers unrelated to why this
+			// winner was picked.
 			logSyncEvent(meta.deviceId, "conflict:resolved", {
 				taskId: resolved.taskId,
 				winner,
+				localModifiedTime: local?.task.modifiedTime,
+				remoteModifiedTime: rt.modifiedTime,
 				localUpdatedAt: local?.updatedAt ? new Date(local.updatedAt).toLocaleString() : undefined,
-				remoteUpdatedAt: new Date(remoteUpdatedAt).toLocaleString()
+				remoteUpdatedAt: new Date(remoteUpdatedAt).toLocaleString(),
+				localLastVaultSync: local?.lastVaultSync ? new Date(local.lastVaultSync).toLocaleString() : undefined
 			});
 		}
 		toPut.push(resolved);
