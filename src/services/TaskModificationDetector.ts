@@ -270,6 +270,19 @@ export class TaskModificationDetector {
 			lineTask.tags = [...(lineTask.tags || []), 'ticktick'];
 		}
 
+		// Parent detection is indentation-based within the current file's
+		// fileMap. When a task's line moves to a different vault file (with
+		// no parent line alongside it), lineTask.parentId legitimately comes
+		// back empty for that file's context -- that's an artifact of the
+		// move, not the user intentionally removing the parent. Preserve the
+		// last-known parentId in that specific case; a same-file dedent
+		// (genuine intentional un-parenting) is untouched since this only
+		// fires when the file itself changed.
+		const moveCheckForParent = await this.checkForTaskMove(taskId, filepath!);
+		if (moveCheckForParent.moved && !lineTask.parentId && savedTask.parentId) {
+			lineTask.parentId = savedTask.parentId;
+		}
+
 		// Ensure task has required fields
 		if (!savedTask.dateHolder) {
 			this.plugin.dateMan?.addDateHolderToTask(savedTask, undefined);
