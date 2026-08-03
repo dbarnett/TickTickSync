@@ -305,7 +305,12 @@ export class TaskParser {
 		content = __ret.content;
 		taskItems = __ret.taskItems;
 
-		let timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		// A timezone only means something relative to a date -- don't
+		// manufacture one for a task that doesn't have either.
+		let timeZone: string | undefined;
+		if (allDatesStruct?.dueDate || allDatesStruct?.startDate) {
+			timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		}
 
 		// The #ticktick tag is Obsidian-side control signal (marks this line
 		// as plugin-tracked) -- it's not a real tag and must never be sent
