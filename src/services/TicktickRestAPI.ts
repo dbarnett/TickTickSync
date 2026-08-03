@@ -478,7 +478,13 @@ export class TickTickRestAPI {
 
 		//Near as I can tell, this is redundant, but TickTick does it. I think it may be a
 		// sortorder thing, Just do it.
-		await this.api?.updateTask(task);
+		// Same clobbering risk as the general update path (see docs/sync-logic.md
+		// § Push path): the wrapper resets any field not present in the payload
+		// to a hardcoded default rather than leaving it alone, so this must send
+		// live server state (with only projectId overridden), not the raw,
+		// possibly-stale `task` object passed in by the caller.
+		const serverTask = await this.getTaskById(task.id, toProject) ?? task;
+		await this.api?.updateTask({ ...serverTask, id: task.id, projectId: toProject });
 
 	}
 
