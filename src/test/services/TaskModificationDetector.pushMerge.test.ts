@@ -18,6 +18,8 @@ import { DateMan } from '@/dateMan';
 import { NewFileMap, type ITaskRecord } from '@/services/NewFileMap';
 import type { ITask } from '@/api/types/Task';
 import { getSettings } from '@/settings';
+import { markRemoteChanged } from '@/sync/conflictTracking';
+import { Notice } from 'obsidian';
 
 vi.mock('@/db/projects', () => ({
 	getAllProjects: vi.fn().mockResolvedValue([]),
@@ -80,6 +82,7 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 	}
 
 	beforeEach(() => {
+		vi.mocked(Notice).mockClear();
 		getSettings().fileLinksInTickTick = 'noLink';
 		getSettings().syncNotes = true;
 
@@ -183,5 +186,45 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 		expect(pushedTask).toMatchObject({
 			tags: expect.arrayContaining(['urgent']),
 		});
+	});
+
+	it('warns when a field being pushed was also changed remotely this same sync cycle', async () => {
+		const line = `- [ ] Updated title #ticktick  %%[ticktick_id:: ${TASK_ID}]%%`;
+
+		const savedTask = makeTask({ title: 'Original title', priority: 0 });
+		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		getTaskByIdSpy.mockResolvedValue(makeTask({ title: 'Original title', priority: 0 }));
+
+		// Simulate this cycle's pull step having just seen TickTick change
+		// the title independently, before this push-detection check runs.
+		markRemoteChanged(TASK_ID, ['title']);
+
+		await detector.checkLineForModifications(FILEPATH, line, 0, makeFileMap(line));
+
+		const conflictNotices = vi.mocked(Notice).mock.calls
+			.map(call => call[0])
+			.filter((msg): msg is string => typeof msg === 'string' && msg.includes('edited on both TickTick and in Obsidian'));
+		expect(conflictNotices).toEqual([expect.stringContaining('title')]);
+	});
+
+	it('does not warn when the remote change was to an unrelated field', async () => {
+		const line = `- [ ] Updated title #ticktick  %%[ticktick_id:: ${TASK_ID}]%%`;
+
+		const savedTask = makeTask({ title: 'Original title', priority: 0 });
+		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		getTaskByIdSpy.mockResolvedValue(makeTask({ title: 'Original title', priority: 0 }));
+
+		// TickTick changed status remotely, but this edit only touches title --
+		// no overlap, no warning.
+		markRemoteChanged(TASK_ID, ['status']);
+
+		await detector.checkLineForModifications(FILEPATH, line, 0, makeFileMap(line));
+
+		const conflictNotices = vi.mocked(Notice).mock.calls
+			.map(call => call[0])
+			.filter((msg): msg is string => typeof msg === 'string' && msg.includes('edited on both TickTick and in Obsidian'));
+		expect(conflictNotices).toEqual([]);
 	});
 });

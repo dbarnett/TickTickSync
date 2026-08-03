@@ -25,6 +25,7 @@ import type { LocalTask } from '@/db/schema';
 import { NewFileMap, type ITaskItemRecord, type ITaskRecord } from '@/services/NewFileMap';
 import { FolderSyncService } from '@/services/FolderSyncService';
 import { getSettings } from '@/settings';
+import { consumeRemoteChanged } from '@/sync/conflictTracking';
 import log from '@/utils/logger';
 import ObjectID from 'bson-objectid';
 import { normalizeRepeatFlag } from '@/utils/RecurrenceConverter';
@@ -414,6 +415,29 @@ export class TaskModificationDetector {
 		newHash: string
 	): Promise<boolean> {
 		let modified = false;
+
+		// Simultaneous-edit check: did TickTick change one of the same
+		// fields Obsidian is about to push, during this same sync cycle's
+		// pull? If so this isn't "Obsidian edited it," it's a genuine
+		// collision, and blindly pushing Obsidian's copy silently discards
+		// whatever changed on TickTick's side. We still push (no merge logic
+		// here to pick a winner) but surface it loudly rather than let it
+		// happen silently -- see conflictTracking.ts.
+		const remoteChangedFields = consumeRemoteChanged(taskId);
+		if (remoteChangedFields && remoteChangedFields.size > 0) {
+			const pushingFields = [
+				modifications.titleModified && 'title',
+				modifications.priorityModified && 'priority',
+				modifications.statusModified && 'status',
+				modifications.datesModified && (remoteChangedFields.has('dueDate') ? 'dueDate' : remoteChangedFields.has('startDate') ? 'startDate' : undefined),
+			].filter((f): f is string => !!f);
+			const collidingFields = pushingFields.filter(f => remoteChangedFields.has(f));
+			if (collidingFields.length > 0) {
+				const message = `TickTickSync: "${lineTask.title}" was edited on both TickTick and in Obsidian since the last sync (${collidingFields.join(', ')}). Keeping the Obsidian version -- check TickTick if that's not what you wanted.`;
+				log.warn(message);
+				new Notice(message, 10000);
+			}
+		}
 
 		// Preserve timezone
 		lineTask.timeZone = savedTask.timeZone;

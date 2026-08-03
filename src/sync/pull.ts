@@ -1,9 +1,18 @@
 import { db } from "@/db/dexie";
 import { resolveTaskConflict } from "./conflicts";
 import { logSyncEvent } from "./journal";
+import { clearRemoteChangedTracking, markRemoteChanged } from "./conflictTracking";
 import type { TickTickRestAPI } from '@/services/TicktickRestAPI';
 import type { LocalTask, SyncMeta } from "@/db/schema";
+import type { ITask } from '@/api/types/Task';
 import log from '@/utils/logger';
+
+/** Fields whose divergence during pull is worth flagging as a possible simultaneous edit. */
+const CONFLICT_WATCH_FIELDS: (keyof ITask)[] = ['title', 'priority', 'status', 'dueDate', 'startDate'];
+
+function diffWatchedFields(previous: ITask, incoming: ITask): string[] {
+	return CONFLICT_WATCH_FIELDS.filter(field => previous[field] !== incoming[field]);
+}
 
 /** Resolve a task identifier that may appear as `id` or `taskId`. */
 function resolveTaskId(task: { id?: string; taskId?: string }): string | undefined {
@@ -21,6 +30,8 @@ export async function pullFromTickTick(
 	meta: SyncMeta,
 	fullSync = true
 ) {
+
+	clearRemoteChangedTracking();
 
 	const { update, delete: deletedIds } = await ticktickRestApi.getUpdatedTasks(
 		fullSync ? 0 : meta.lastDeltaSync
@@ -55,6 +66,22 @@ export async function pullFromTickTick(
 		// Ensure dateHolder is correctly merged with local task if available
 		if (local) {
 			ticktickRestApi.plugin.dateMan?.addDateHolderToTask(rt, local.task);
+		}
+
+		// Preserve our local change-detection hash across the pull -- `rt`
+		// comes straight from the TickTick API and never carries one. Losing
+		// it here makes push-detection see a spurious hash mismatch on the
+		// next check even when nothing local actually changed.
+		if (local?.task.lineHash) {
+			rt.lineHash = local.task.lineHash;
+		}
+
+		// A genuine, non-echo remote change to a field push-detection also
+		// cares about -- flag it so the push step (running right after, same
+		// cycle) can tell a real simultaneous edit apart from Obsidian simply
+		// not having caught up yet. See conflictTracking.ts.
+		if (local) {
+			markRemoteChanged(remoteId, diffWatchedFields(local.task, rt));
 		}
 
 		const remoteLocalTask: LocalTask = {
