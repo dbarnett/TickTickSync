@@ -1,7 +1,7 @@
 {
 	"name": "tickticksync",
-	"version": "2.0.1",
-	"description": "Sync TickTick tasks to Obsidian, and Obsidian tasks to TickTick",
+	"version": "2.0.10",
+	"description": "Sync tasks and notes bidirectionally with TickTick.",
 	"main": "main.js",
 	"scripts": {
 		"check": "tsc --noEmit",
@@ -32,13 +32,10 @@
 	"dependencies": {
 		"@types/lowdb": "^1.0.15",
 		"bson-objectid": "^2.0.4",
-		"builtin-modules": "^5.3.0",
-		"capacitor": "^0.5.6",
 		"crypto-hash": "^3.1.0",
 		"dependency-tree": "^11.0.1",
 		"dexie": "^4.2.1",
 		"eventemitter2": "^6.4.9",
-		"lodash-es": "^4.17.21",
 		"loglevel": "^1.9.2",
 		"obsidian": "latest",
 		"punycode": "^2.3.1",

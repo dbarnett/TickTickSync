@@ -65,10 +65,14 @@ export class ProjectSyncService {
 		const fileMetadatas = await this.plugin.fileMetadataService.getAllFileMetadata();
 		if (!fileMetadatas) return;
 		const projects = await getAllProjects();
-		if (!projects || Object.keys(projects).length == 0) return;
 
 		const project = projects.find(p => p.id === ttProjectId);
-		if (!project) {
+		// A project needs a file mapping whether it is brand new to us or was
+		// cached before we ever managed to map it to a file (first run: the
+		// projects cache is populated in the same pass, so nothing ever looks
+		// "new" again and the mapping would never be created).
+		const mappedPath = await this.plugin.fileMetadataService.getFilepathForProjectId(ttProjectId);
+		if (!mappedPath) {
 			let newFilePath: string;
 			const folder = getDefaultFolder();
 			const sanitize = (name: string): string =>
@@ -89,11 +93,23 @@ export class ProjectSyncService {
 				newFilePath = (folder ? folder + "/" : "") + safeProjectName + '.md';
 			}
 
-			log.debug(`New project detected: ${ttProjectName} (${ttProjectId}). Creating file entry: ${newFilePath}`);
+			// A project that is already in the cache but whose vault file is
+			// gone had its file deliberately deleted by the user (and cleaned up
+			// from the database). Re-creating the mapping here would resurrect
+			// the entry on every sync. Only re-create the mapping when the vault
+			// file still exists (e.g. the DB record was lost) or the project is
+			// brand new (not cached yet, so it still needs its initial mapping).
+			const vaultFile = this.app?.vault?.getAbstractFileByPath ? this.app.vault.getAbstractFileByPath(newFilePath) : undefined;
+			if (project && !(vaultFile instanceof TFile)) {
+				log.debug(`Not re-creating file entry for ${ttProjectName} (${ttProjectId}): vault file ${newFilePath} does not exist.`);
+				return;
+			}
+
+			log.debug(`Unmapped project: ${ttProjectName} (${ttProjectId}). Creating file entry: ${newFilePath}`);
 			await upsertFile(newFilePath, ttProjectId);
 			return;
 		}
-		if (project?.name !== ttProjectName) {
+		if (project && project.name !== ttProjectName) {
 			log.debug(`Project Name Changed from ${project?.name} to ${ttProjectName}`)
 
 			const files = await getAllFiles();

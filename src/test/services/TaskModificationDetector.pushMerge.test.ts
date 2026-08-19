@@ -27,6 +27,7 @@ vi.mock('obsidian', () => ({
 	Notice: vi.fn(),
 	TFile: vi.fn(),
 	TFolder: vi.fn(),
+	Modal: vi.fn(),
 }));
 
 const TASK_ID = 'abcdefabcdefabcdefabcdef';

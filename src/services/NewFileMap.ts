@@ -96,6 +96,11 @@ export class NewFileMap {
 			} else {
 				insertLine = this.fileLines.length;
 			}
+			// If inserting at the end and the last line is empty (from trailing \n),
+			// insert before it to avoid adding a blank line
+			if (insertLine === this.fileLines.length && this.fileLines.length > 0 && this.fileLines[this.fileLines.length - 1] === '') {
+				insertLine--;
+			}
 		}
 		const taskLines = taskLine.split('\n');
 		this.fileLines.splice(insertLine, 0, ...taskLines);
@@ -103,12 +108,13 @@ export class NewFileMap {
 		return insertLine;
 	}
 
-	updateTask(task: ITask, taskLine: string, bParentUpdate = false) {
+	/** @returns true if the task's line was rewritten, false if the task was not in the file. */
+	updateTask(task: ITask, taskLine: string, bParentUpdate = false): boolean {
 		this.rebuildEntries();
 		const entry = this.entries.find(e => e.id === task.id);
 		if (!entry) {
 			log.warn(`updateTask: task ${task.id} not found in ${this.file.path}`);
-			return;
+			return false;
 		}
 
 		const oldLineIdx = entry.lineIdx;
@@ -159,6 +165,7 @@ export class NewFileMap {
 			}
 		}
 		this.rebuildEntries();
+		return true;
 	}
 
 	deleteTask(id: string, bKillTheChildren: boolean = false): number {
