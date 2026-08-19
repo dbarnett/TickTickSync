@@ -5,6 +5,7 @@ import { clearRemoteChangedTracking, markRemoteChanged } from "./conflictTrackin
 import type { TickTickRestAPI } from '@/services/TicktickRestAPI';
 import type { LocalTask, SyncMeta } from "@/db/schema";
 import type { ITask } from '@/api/types/Task';
+import { updateSettings } from '@/settings';
 import log from '@/utils/logger';
 
 /** Fields whose divergence during pull is worth flagging as a possible simultaneous edit. */
@@ -145,6 +146,9 @@ export async function pullFromTickTick(
 			lastDeltaSync: ticktickRestApi.checkpoint
 		});
 	}
+	// Persist checkpoint to data.json so it survives Dexie DB resets
+	updateSettings({ checkPoint: ticktickRestApi.checkpoint });
+	await ticktickRestApi.plugin.saveSettings();
 	logSyncEvent(meta.deviceId, "pull:complete", { applied });
 
 	return applied;

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { TFile } from 'obsidian';
 import type { IProject } from '@/api/types/Project';
 
 vi.mock('obsidian', () => ({
@@ -98,6 +99,20 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		upsertFile.mockClear();
 	});
 
+	it('never creates a vault file mapping for a project, even on the very first sync', async () => {
+		const { plugin } = makePlugin();
+		const svc = new ProjectSyncService({} as never, plugin as never);
+
+		// A fresh install starts with an empty projects cache.
+		expect(projectsTable.size).toBe(0);
+
+		await svc.saveProjectsToCache(remoteProjects());
+
+		// This fork never materializes a vault file just because a project
+		// exists on TickTick -- see ProjectSyncService's class doc comment.
+		expect(upsertFile).not.toHaveBeenCalled();
+	});
+
 	it('does not re-create mappings on subsequent syncs', async () => {
 		const { plugin } = makePlugin();
 		const svc = new ProjectSyncService({} as never, plugin as never);
@@ -107,6 +122,57 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 
 		await svc.saveProjectsToCache(remoteProjects());
 		await svc.saveProjectsToCache(remoteProjects());
+
+		expect(upsertFile).not.toHaveBeenCalled();
+	});
+
+	it('still relocates the file when a project is renamed in TickTick', async () => {
+		const { plugin, updateFilePath } = makePlugin();
+		const svc = new ProjectSyncService(
+			{ vault: { getAbstractFileByPath: () => null } } as never,
+			plugin as never
+		);
+
+		// Project is already cached under its old name and already mapped to a file.
+		projectsTable.set('proj-a', { id: 'proj-a', project: { id: 'proj-a', name: 'Work' } as IProject });
+		filesTable.set('Work.md', { path: 'Work.md', defaultProjectId: 'proj-a' });
+
+		await svc.checkProjectRename('proj-a', 'Work Stuff');
+
+		expect(updateFilePath).toHaveBeenCalledWith('Work.md', 'Work Stuff.md');
+	});
+
+	it('does not re-create a file entry for a cached project whose vault file is gone', async () => {
+		const { plugin } = makePlugin();
+		const svc = new ProjectSyncService(
+			{ vault: { getAbstractFileByPath: () => null } } as never,
+			plugin as never
+		);
+
+		// Project is cached (survives the database cleanup) but its vault file
+		// was deleted and cleaned up, so there is no mapping anymore.
+		projectsTable.set('proj-a', { id: 'proj-a', project: { id: 'proj-a', name: 'Work' } as IProject });
+
+		await svc.checkProjectRename('proj-a', 'Work');
+
+		expect(upsertFile).not.toHaveBeenCalled();
+	});
+
+	it('does not create a file entry for a cached project even when a same-named vault file exists', async () => {
+		const { plugin } = makePlugin();
+		const svc = new ProjectSyncService(
+			{ vault: { getAbstractFileByPath: () => new TFile() } } as never,
+			plugin as never
+		);
+
+		// Project is cached but has no file mapping (e.g. the DB mapping was
+		// lost), and its TickTick name changed. Even though a same-named
+		// vault file exists, this fork never infers or creates
+		// project<->file mappings -- that has to be explicit user action,
+		// not a filename guess.
+		projectsTable.set('proj-a', { id: 'proj-a', project: { id: 'proj-a', name: 'Work' } as IProject });
+
+		await svc.checkProjectRename('proj-a', 'Work Stuff');
 
 		expect(upsertFile).not.toHaveBeenCalled();
 	});

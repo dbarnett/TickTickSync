@@ -41,6 +41,18 @@ export interface TaskModifications {
 	notesModified: boolean;
 	projectMoved: boolean;
 	repeatFlagModified: boolean;
+	remindersModified: boolean;
+}
+
+/**
+ * A task found in a vault file that is neither in the local cache nor on
+ * TickTick. Collected during a sync scan so all such tasks (across all files)
+ * can be confirmed for deletion in a single dialog.
+ */
+export interface PendingTickTickDeletion {
+	file: TFile;
+	filepath: string;
+	lineTask: ITask;
 }
 
 export class TaskModificationDetector {
@@ -99,7 +111,11 @@ export class TaskModificationDetector {
 				);
 
 				// Create task in TickTick
-				const newTask = await this.plugin.tickTickRestAPI?.createTask(currentTask) as ITask;
+				const newTask = await this.plugin.tickTickRestAPI?.createTask(currentTask) as ITask | null;
+				if (!newTask) {
+					// createTask already surfaced the API error in a Notice.
+					return;
+				}
 
 				// Handle parent-child relationship
 				if (currentTask.parentId) {
@@ -138,6 +154,10 @@ export class TaskModificationDetector {
 			} catch (error) {
 				log.error('Error adding task:', error);
 				log.error(`The error occurred in file: ${fileMap.getFilePath()}`);
+				new Notice(
+					`Failed to add task to TickTick: ${error instanceof Error ? error.message : String(error)}. The task was not modified.`,
+					8000
+				);
 			}
 		}
 	}
@@ -181,7 +201,8 @@ export class TaskModificationDetector {
 		filepath: string | undefined,
 		lineText: string,
 		lineNumber: number | undefined,
-		fileMap: NewFileMap
+		fileMap: NewFileMap,
+		pendingDeletions?: PendingTickTickDeletion[]
 	): Promise<boolean> {
 		// Only process full tasks here.  taskParser.isTaskItem handles item
 		// identification; note-level content is skipped entirely.
@@ -225,6 +246,17 @@ export class TaskModificationDetector {
 				return false;
 			}
 
+			if (pendingDeletions) {
+				log.error(`Task ${taskId} not found on TickTick. Queueing for deletion from file ${filepath}`);
+				const file = this.app.vault.getAbstractFileByPath(filepath!);
+				if (!(file instanceof TFile)) { return false; }
+				const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
+				if (lineTask) {
+					pendingDeletions.push({ file, filepath: filepath!, lineTask });
+				}
+				return false;
+			}
+
 			log.error(`Task ${taskId} not found on TickTick. Deleting from file ${filepath}`);
 			new Notice(`Task not found. It will be removed from the file.`);
 			const file = this.app.vault.getAbstractFileByPath(filepath!);
@@ -260,16 +292,10 @@ export class TaskModificationDetector {
 		// Convert line to task object
 		const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
 
-		// convertLineToTask never includes the "ticktick" control tag in
-		// lineTask.tags (it's an Obsidian-side signal, not a real TT tag).
-		// If TickTick already independently has a genuine "ticktick" tag on
-		// this task (per our last-known state), preserve it here so
-		// comparisons/updates don't silently strip it -- we should never
-		// actively add or remove it, only leave whatever's already there.
-		if (savedTask.tags?.some(t => t.toLowerCase() === 'ticktick') &&
-			!lineTask.tags?.some(t => t.toLowerCase() === 'ticktick')) {
-			lineTask.tags = [...(lineTask.tags || []), 'ticktick'];
-		}
+		// If TickTick already has a genuine "ticktick" tag on this task, keep
+		// it so comparisons/updates don't silently strip it (see
+		// TaskParser.preserveTickTickTag).
+		this.plugin.taskParser?.preserveTickTickTag(lineTask, savedTask);
 
 		// Parent detection is indentation-based within the current file's
 		// fileMap. When a task's line moves to a different vault file (with
@@ -302,7 +328,7 @@ export class TaskModificationDetector {
 	/**
 	 * Check entire file for modifications
 	 */
-	async checkFileForModifications(filepath: string | null): Promise<void> {
+	async checkFileForModifications(filepath: string | null, pendingDeletions?: PendingTickTickDeletion[]): Promise<void> {
 		if (!filepath) {
 			return;
 		}
@@ -321,7 +347,7 @@ export class TaskModificationDetector {
 			const line = lines[i];
 			if (this.plugin.taskParser?.isMarkdownTask(line)) {
 				try {
-					await this.checkLineForModifications(filepath, line, i, fileMap);
+					await this.checkLineForModifications(filepath, line, i, fileMap, pendingDeletions);
 				} catch (error) {
 					log.error('Error checking task modification:', error);
 				}
@@ -382,7 +408,8 @@ export class TaskModificationDetector {
 			taskItemsModified: this.plugin.taskParser.areItemsChanged(lineTask.items, savedTask.items),
 			notesModified: this.detectNotesModification(lineTask, savedTask),
 			projectMoved: false, // Will be set separately
-			repeatFlagModified: normalizeRepeatFlag(lineTask.repeatFlag) !== normalizeRepeatFlag(savedTask.repeatFlag)
+			repeatFlagModified: normalizeRepeatFlag(lineTask.repeatFlag) !== normalizeRepeatFlag(savedTask.repeatFlag),
+			remindersModified: this.plugin.taskParser?.areRemindersChanged(lineTask, savedTask) || false
 		};
 	}
 
@@ -497,6 +524,16 @@ export class TaskModificationDetector {
 				mergedTask.desc = lineTask.desc;
 			}
 			if (modifications.repeatFlagModified) mergedTask.repeatFlag = lineTask.repeatFlag;
+			// mergedTask already defaults to the live server's reminder state
+			// for anything untouched (see comment above) -- that supersedes
+			// the older preserveReminders helper's manual carry-forward, which
+			// only applies to the direct-push paths elsewhere (syncModule,
+			// TaskOperationsService) that don't merge against server state.
+			if (modifications.remindersModified) {
+				mergedTask.reminders = lineTask.reminders;
+				mergedTask.reminder = lineTask.reminder;
+				mergedTask.remindTime = lineTask.remindTime;
+			}
 
 			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(mergedTask) as ITask;
 			updatedTask.dateHolder = saveDateHolder;
@@ -537,7 +574,8 @@ export class TaskModificationDetector {
 			modifications.taskItemsModified ||
 			modifications.notesModified ||
 			modifications.projectMoved ||
-			modifications.repeatFlagModified;
+			modifications.repeatFlagModified ||
+			modifications.remindersModified;
 	}
 
 	/**

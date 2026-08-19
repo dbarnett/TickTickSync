@@ -32,7 +32,7 @@ export const NOTABLE_CHANGES: NotableChange[] = [
 	},
 	{
 		version: '1.1.8',
-		title: "Links between Obsidian and TickTick can now be configured: <strong>No Link</strong>, <strong>Link in Task</strong>, or <strong>Link in Description</strong>",
+		title: "Links between Obsidian and TickTick can now be configured: **No Link**, **Link in Task**, or **Link in Description**",
 		description: "",
 		anchor: '1.1.8',
 	},
@@ -57,7 +57,25 @@ export const NOTABLE_CHANGES: NotableChange[] = [
 	{
 		version: '2.0.1',
 		title: "Complete re-architecture for better cross-device handling",
-		description: "General performance improvements\n<strong>Recurrence processing</strong>\n<strong>Task display visibility controls</strong> — custom rendering for TickTick tasks in reading & edit mode\n<strong>Granular link hiding</strong> for TickTick tasks in reading & edit mode\n<strong>Sync journal persisted to Dexie</strong>, with modal viewer\n<strong>Device identity & tracking</strong> — mobile device ID capture, device naming in settings\n<strong>Project preservation</strong> — follow TickTick project folder structure\n<strong>Orphan task detection</strong> modal, <strong>found duplicate tasks</strong> modal\n<strong>Conflict resolution</strong> logging\n<strong>Access control / SSO 2FA login</strong> improvements\n<strong>Soft-delete task lifecycle</strong> — auto-cleanup of deleted tasks after configurable retention period (default 7 days), manual permanent deletion, recovery,\n<strong>Tag handling overhaul</strong> — case-sensitivity respected, sub-tags handled correctly.\n<strong>Case-insensitive project matching</strong> (via normalized dashes)\n<strong>Task file stickiness on sync</strong> — tasks stay associated with their source file across syncs",
+		description: "General performance improvements\n**Recurrence processing**\n**Task display visibility controls** — custom rendering for TickTick tasks in reading & edit mode\n**Granular link hiding** for TickTick tasks in reading & edit mode\n**Sync journal persisted to Dexie**, with modal viewer\n**Device identity & tracking** — mobile device ID capture, device naming in settings\n**Project preservation** — follow TickTick project folder structure\n**Orphan task detection** modal, **found duplicate tasks** modal\n**Conflict resolution** logging\n**Access control / SSO 2FA login** improvements\n**Soft-delete task lifecycle** — auto-cleanup of deleted tasks after configurable retention period (default 7 days), manual permanent deletion, recovery,\n**Tag handling overhaul** — case-sensitivity respected, sub-tags handled correctly.\n**Case-insensitive project matching** (via normalized dashes)\n**Task file stickiness on sync** — tasks stay associated with their source file across syncs",
 		anchor: '2.0.1',
+	},
+	{
+		version: '2.0.5',
+		title: "**Fresh installs now sync correctly** — tasks pulled from TickTick appear in your vault from the very first sync (project-to-file mapping is created automatically)",
+		description: "**All-day task dates no longer drift** — due dates on all-day tasks could shift by a day on each sync in some timezones; now stable\n**TickTick tag handling is now configurable** — new settings under **Task Display** let you stop injecting the `ticktick` tag onto TickTick tasks, and strip the legacy tag when you reset your tasks\n**Better documentation** — sync timing, conflict handling, and known TickTick quirks are now covered in the docs\n**Make settings 1.13.x compatible**\nGeneral stability and performance improvements",
+		anchor: '2.0.5',
+	},
+	{
+		version: '2.0.8',
+		title: "**Misplaced project files are now resolved instead of duplicated** — when a new vault file matches a project by name but is located outside the expected folder, you're asked how to proceed: move it to the correct location (merging the two files if one already exists), delete the misplaced file, delete the file at the correct location, or skip (leaves the file unassociated)",
+		description: "**Reminders** — set TickTick reminders from Obsidian with the `⏰` emoji plus a relative duration (`⏰ 30m`, `⏰ 1d`, `⏰ 0m` for on time, `⏰ off` to clear). Multiple `⏰` tokens add multiple reminders. Editing a task without `⏰` no longer wipes reminders set in the TickTick app. See [Task Format](task-format.md#reminders).\n**Aggregated deletions** — tasks missing from TickTick are now grouped into a single confirmation dialog\n**Project rename safety** — guard added so a renamed project can't be mistaken for a moved project\nGeneral stability and performance improvements",
+		anchor: '2.0.8',
+	},
+	{
+		version: '2.0.10',
+		title: "**Create tasks with reminders** — writing `⏰ 30m` on a new Obsidian task now creates it in TickTick with the reminder set (previously reminders were only pulled from TickTick, not pushed on create). See [Task Format](task-format.md#reminders).",
+		description: "**Multiple reminders round-trip correctly** — reminders synced from TickTick are fully preserved when editing the task in Obsidian, including their IDs and trigger values.",
+		anchor: '2.0.10',
 	}
 ];
