@@ -309,7 +309,6 @@ export class TaskModificationDetector {
 		if (moveCheckForParent.moved && !lineTask.parentId && savedTask.parentId) {
 			lineTask.parentId = savedTask.parentId;
 		}
-
 		// Ensure task has required fields
 		if (!savedTask.dateHolder) {
 			this.plugin.dateMan?.addDateHolderToTask(savedTask, undefined);
