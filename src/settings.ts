@@ -87,7 +87,13 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	fileLinksInTickTick: 'taskLink',
 	taskLinksInObsidian: 'taskLink',
 	bkupFolder: '/',
-	stopInjectingTickTickTag: false,
+	// Fork default: this fork's original stop-injecting-the-ticktick-tag fix
+	// (never add/remove, only preserve what's already there) predates
+	// upstream's opt-in setting -- flip the default on to match that
+	// original behavior instead of upstream's opt-in-off default.
+	// stripTickTickTagOnReset stays opt-in: the original fix never actively
+	// stripped the tag, only preserved.
+	stopInjectingTickTickTag: true,
 	stripTickTickTagOnReset: false,
 	handleArchivedLists: false,
 	handleDeletedLists: false,
