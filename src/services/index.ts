@@ -9,8 +9,10 @@ import { NewFileMap } from '@/services/NewFileMap';
 //Logging
 import log from '@/utils/logger';
 import { FoundDuplicateTasksModal } from '@/modals/FoundDuplicateTasksModal';
-import { TaskDeletionModal } from '@/modals/TaskDeletionModal';
+import { CleanupDatabaseModal } from '@/modals/CleanupDatabaseModal';
+import { TaskDeletionModal, type DeletionItem } from '@/modals/TaskDeletionModal';
 import { OrphanTaskModal, type OrphanItem } from '@/modals/OrphanTaskModal';
+import type { PendingTickTickDeletion } from '@/services/TaskModificationDetector';
 import type { ITask } from '@/api/types/Task';
 import { getTick } from '@/api/tick_singleton_factory'
 import { syncTickTickWithDexie } from '@/sync/sync';
@@ -162,14 +164,62 @@ export class TickTickService {
 	async ensureVaultFilesRegistered(): Promise<void> {
 		const vault = this.plugin.app.vault;
 		const markdownFiles = vault.getMarkdownFiles();
+		const allProjects = await this.getProjects();
 
 		for (const file of markdownFiles) {
 			const dbFile = await getFile(file.path);
 			if (!dbFile) {
-				log.debug(`Registering file: ${file.path}`);
-				await upsertFile(file.path);
+				await this.registerNewVaultFile(file, allProjects);
 			}
 		}
+	}
+
+	/**
+	 * Register a new (previously unseen) vault file in the database.
+	 * When keepProjectFolders is on and the file's basename matches a project but its
+	 * location differs from the expected one, asks the user how to resolve the conflict
+	 * (move/merge, delete one of the files, or skip) instead of auto-associating the file
+	 * at the wrong location.
+	 * @param file - The new vault file
+	 * @param allProjects - All known projects
+	 */
+	private async registerNewVaultFile(file: TFile, allProjects: IProject[]): Promise<void> {
+		// Look up file name in projects cache to auto-associate
+		const fileName = file.basename;
+		const matchingProject = allProjects.find(p => p.name === fileName);
+
+		if (matchingProject && getSettings().keepProjectFolders && this.plugin.folderSyncService) {
+			const basePath = getDefaultFolder();
+			const expectedFolderPath = await this.plugin.folderSyncService.getFolderPathForProject(matchingProject.id);
+			const fileFolder = file.path.includes('/') ? file.path.substring(0, file.path.lastIndexOf('/')) : '';
+
+			// If group lookup failed (expected == base path) and file is in a subfolder,
+			// we can't determine the correct location — fall back to plain auto-association
+			// (mirrors the guard used in checkDataBase).
+			const canDetermineGroup = !(expectedFolderPath === basePath && fileFolder !== basePath);
+
+			if (canDetermineGroup) {
+				const expectedPath = await this.plugin.folderSyncService.getFilePathForProject(matchingProject.id, matchingProject.name);
+				if (expectedPath !== file.path) {
+					log.debug(`Found new file ${file.path} matching project "${matchingProject.name}" but expected at ${expectedPath}. Presenting location conflict.`);
+					await this.plugin.folderSyncService.resolveFileLocationConflict(file.path, expectedPath, matchingProject);
+					return;
+				}
+				// File is already at the keepProjectFolders-expected path -- the
+				// user has opted into folder-based project tracking, so this
+				// association is explicit, not a guess.
+				log.debug(`Auto-associating file with project: ${file.path} -> ${matchingProject.name}`);
+				await upsertFile(file.path, matchingProject.id);
+				return;
+			}
+		}
+
+		// keepProjectFolders is off (the default), or no folder-based project
+		// match was found: never infer a file's owning project from its
+		// filename -- this plugin doesn't decide which note "owns" a project
+		// without an explicit user action.
+		log.debug(`Registering file: ${file.path}`);
+		await upsertFile(file.path);
 	}
 
 	async saveProjectsToCache(): Promise<IProject[] | undefined> {
@@ -335,6 +385,7 @@ export class TickTickService {
 
 		const tasksToDelete: { filepath: string, taskId: string, title: string }[] = [];
 		const tasksToResolve: { filepath: string, taskId: string, title: string, projectId: string, task: ITask, inFile: boolean }[] = [];
+		const deletedFiles: string[] = [];
 		const allLocalIds = new Set<string>();
 
 		await doWithLock(LOCK_TASKS, async () => {
@@ -396,8 +447,8 @@ export class TickTickService {
 							continue;
 						}
 					}
-					log.debug(`Removing DB entry for non-existent file: ${dbFile.path}`);
-					await this.plugin.fileMetadataService.deleteFileMetadata(dbFile.path);
+					log.debug(`Found DB entry for non-existent file: ${dbFile.path}`);
+					deletedFiles.push(dbFile.path);
 				}
 			}
 
@@ -405,9 +456,10 @@ export class TickTickService {
 			for (const file of markdownFiles) {
 				const dbFile = await getFile(file.path);
 				if (!dbFile) {
-					log.debug(`Adding new DB entry for file: ${file.path}`);
-					await upsertFile(file.path);
+					await this.registerNewVaultFile(file, allProjects);
 				}
+				// else: file already has a DB entry -- never re-infer or
+				// correct its project association from filename alone.
 			}
 
 			// 3. Consistency check for tasks and missed tasks
@@ -552,6 +604,20 @@ export class TickTickService {
 		log.debug(`Finished checking database for ${markdownFiles.length} markdown files and ${dbFiles.length} DB entries.`);
 		log.debug(`Found ${tasksToDelete.length} tasks to be deleted.`);
 		log.debug(`Known local task IDs: ${allLocalIds.size}.`);
+
+		// Offer to clean up DB entries for files that no longer exist in the vault
+		if (deletedFiles.length > 0) {
+			log.debug(`Found ${deletedFiles.length} DB entries for non-existent files.`);
+			const cleanupModal = new CleanupDatabaseModal(this.plugin.app, deletedFiles);
+			const shouldCleanup = await cleanupModal.showModal();
+			if (shouldCleanup) {
+				for (const filepath of deletedFiles) {
+					log.debug(`Removing DB entry for non-existent file: ${filepath}`);
+					await this.plugin.fileMetadataService.deleteFileMetadata(filepath);
+				}
+				new Notice(`Removed ${deletedFiles.length} non-existent file(s) from the database.`);
+			}
+		}
 
 		// Scan TickTick for tasks that have no local reference at all.
 		// These are TT-only tasks -- deliberately NOT auto-materialized into
@@ -727,8 +793,8 @@ export class TickTickService {
 				}
 			}
 
-			if (fileResult) {
-				for (const [taskId, files] of Object.entries(fileResult)) {
+			if (fileResult?.duplicates) {
+				for (const [taskId, files] of Object.entries(fileResult.duplicates)) {
 					const fileList = files;
 					if (fileList.length > 1) {
 						const extraFiles = fileList.slice(1);
@@ -772,11 +838,25 @@ export class TickTickService {
 
 		//let's see if any files got killed while we weren't watching
 		//TODO: Files deleted while we weren't looking is not handled right.
+		const filesMissingFromVault: string[] = [];
 		for (const fileKey in newFilesToSync) {
 			const file = this.plugin.app.vault.getAbstractFileByPath(fileKey);
 			if (!file) {
-				log.debug('File ', fileKey, ' was deleted before last sync.');
-				await this.plugin.fileMetadataService?.deleteFileMetadata(fileKey);
+				filesMissingFromVault.push(fileKey);
+			}
+		}
+
+		if (filesMissingFromVault.length > 0) {
+			const cleanupModal = new CleanupDatabaseModal(this.plugin.app, filesMissingFromVault);
+			const shouldCleanup = await cleanupModal.showModal();
+
+			for (const fileKey of filesMissingFromVault) {
+				if (shouldCleanup) {
+					log.debug('File ', fileKey, ' was deleted before last sync. Cleaning up database.');
+					await this.plugin.fileMetadataService?.deleteFileMetadata(fileKey);
+				} else {
+					log.debug('File ', fileKey, ' was deleted before last sync. Skipped database cleanup.');
+				}
 				delete newFilesToSync[fileKey];
 			}
 		}
@@ -786,6 +866,7 @@ export class TickTickService {
 			// Phase 1: Process new tasks and modifications for all files first.
 			// This detects and handles task moves (updating the DB file field),
 			// so deletions in Phase 2 won't see moved tasks as "missing".
+			const pendingTickTickDeletions: PendingTickTickDeletion[] = [];
 			for (const fileKey in newFilesToSync) {
 				if (bForceUpdate) {
 					try {
@@ -802,9 +883,34 @@ export class TickTickService {
 				}
 
 				try {
-					await this.plugin.taskModificationDetector.checkFileForModifications(fileKey);
+					await this.plugin.taskModificationDetector.checkFileForModifications(fileKey, pendingTickTickDeletions);
 				} catch (error) {
 					log.error('An error occurred in fullTextModifiedTaskCheck:', error);
+				}
+			}
+
+			// Tasks whose ticktick id exists in a vault file but are neither in
+			// the local cache nor on TickTick were collected during Phase 1.
+			// Present a single confirmation dialog covering all affected files
+			// before deleting any of them.
+			if (pendingTickTickDeletions.length > 0) {
+				const items: DeletionItem[] = pendingTickTickDeletions.map(d => ({
+					title: this.plugin.taskParser.stripOBSUrl(d.lineTask.title),
+					filePath: d.filepath
+				}));
+				const modal = new TaskDeletionModal(this.plugin.app, items, 'task(s) not found on TickTick', () => { });
+				const confirmed = await modal.showModal();
+				if (confirmed) {
+					for (const d of pendingTickTickDeletions) {
+						try {
+							log.info(`Deleting task ${d.lineTask.id} from ${d.filepath}`);
+							await this.plugin.fileOperation?.deleteTaskFromSpecificFile(d.file, d.lineTask, false);
+						} catch (error) {
+							log.error(`Error deleting task ${d.lineTask.id} from ${d.filepath}:`, error);
+						}
+					}
+				} else {
+					new Notice('Tasks not found on TickTick will not be deleted.', 5000);
 				}
 			}
 

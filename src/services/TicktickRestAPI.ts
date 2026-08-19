@@ -117,14 +117,29 @@ export class TickTickRestAPI {
 	}
 
 
-	async createTask(taskToAdd: ITask) {
+	async createTask(taskToAdd: ITask): Promise<ITask | null> {
 		await this.initializeAPI();
 		try {
-			const newTask = await this.api?.addTask(taskToAdd as unknown as Record<string, unknown>);
-			if (newTask) {
-				this.plugin.dateMan?.addDateHolderToTask(newTask as ITask, undefined);
+			const response = await this.api?.addTask(taskToAdd);
+			const newTask = response as ITask | undefined;
+
+			// POST /task returns `[]`/`null` on failure. Surface the real error
+			// instead of silently pretending the locally parsed task was created
+			// (that previously stamped a made-up id and lost the task).
+			if (!newTask || Array.isArray(newTask)) {
+				const lastError = this.api?.lastError as { operation?: string; statusCode?: number; errorMessage?: unknown } | undefined;
+				const detail = typeof lastError?.errorMessage === 'string'
+					? lastError.errorMessage
+					: lastError ? JSON.stringify(lastError) : 'no error details';
+				log.error('createTask failed:', lastError);
+				new Notice(`Failed to create task in TickTick${lastError?.statusCode ? ` (${lastError.statusCode})` : ''}: ${detail}`, 8000);
+				return null;
 			}
-			return newTask;
+
+			// Merge local-only fields onto the task TickTick returned.
+			const merged = { ...taskToAdd, ...newTask };
+			this.plugin.dateMan?.addDateHolderToTask(merged, undefined);
+			return merged;
 		} catch (error) {
 			throw new Error(`Error adding task: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -186,7 +201,7 @@ export class TickTickRestAPI {
 		try {
 			const saveDateHolder = taskToUpdate.dateHolder;
 			const saveLineHash = taskToUpdate.lineHash;
-			const updateResult = await this.api?.updateTask(taskToUpdate as unknown as Record<string, unknown>);
+			const updateResult = await this.api?.updateTask(taskToUpdate);
 			if (!updateResult) {
 				//bad shit happened.
 				log.error('Error', 'Update Failed.', this.api?.lastError, taskToUpdate);
@@ -220,7 +235,7 @@ export class TickTickRestAPI {
 			let task = await this.api?.getTask(taskId, projectId);
 			if (task) {
 				task.status = taskStatus;
-				const isSuccess = await this.api?.updateTask(task as unknown as Record<string, unknown>);
+				const isSuccess = await this.api?.updateTask(task);
 				// log.debug(`Task ${taskId} is reopened`)
 				return (isSuccess);
 			} else {
@@ -478,7 +493,7 @@ export class TickTickRestAPI {
 
 		//Near as I can tell, this is redundant, but TickTick does it. I think it may be a
 		// sortorder thing, Just do it.
-		await this.api?.updateTask(task as unknown as Record<string, unknown>);
+		await this.api?.updateTask(task);
 
 	}
 
@@ -493,7 +508,11 @@ export class TickTickRestAPI {
 			}
 
 			// log.debug('childIds after filtering:', task?.childIds);
-			await this.api?.updateTask(task as unknown as Record<string, unknown>);
+			// Old parent may not be locally known (e.g. never synced to this
+			// device) -- skip rather than call updateTask on an undefined task.
+			if (task) {
+				await this.api?.updateTask(task);
+			}
 			// log.debug('updateResult', updateResult);
 		}
 

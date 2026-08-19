@@ -94,6 +94,17 @@ export class SyncMan {
 					const lineTask = await this.plugin.taskParser?.convertLineToTask(lineText, 0, fileMap.getFilePath(), fileMap, taskRecord);
 					const merged = { ...savedTask, ...lineTask };
 					Object.assign(lineTask, merged);
+					// Reminders have no other in-line source here: carry them over
+					// from the last-known state so a force update can't wipe them.
+					this.plugin.taskParser?.preserveReminders(lineTask, savedTask);
+					if (getSettings().stopInjectingTickTickTag && getSettings().stripTickTickTagOnReset) {
+						// User asked to strip legacy "ticktick" tags on reset
+						// (see TaskParser.stripTickTickTag).
+						this.plugin.taskParser?.stripTickTickTag(lineTask);
+					} else {
+						// Preserve a genuine TT-side "ticktick" tag (see TaskParser.preserveTickTickTag)
+						this.plugin.taskParser?.preserveTickTickTag(lineTask, savedTask);
+					}
 					const updatedTask = <ITask>await this.plugin.tickTickRestAPI?.updateTask(lineTask);
 					//let's go ahead and do the file while we're at it.
 					const updatedLineText = await this.plugin.taskParser.convertTaskToLine(updatedTask, this.plugin.taskParser.getNumTabs(lineText))
