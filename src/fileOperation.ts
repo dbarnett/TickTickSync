@@ -268,9 +268,10 @@ export class FileOperation {
 	async checkForDuplicates(fileMetadata: Record<string, unknown>, taskList: Record<string, string> | undefined) {
 		const taskIds: Record<string, string> = {};
 		const duplicates: Record<string, string[]> = {};
+		const notFoundFiles: string[] = [];
 
 		if (!fileMetadata) {
-			return;
+			return { duplicates, notFoundFiles };
 		}
 
 		let fileName;
@@ -281,6 +282,7 @@ export class FileOperation {
 				const currentFile = this.app.vault.getAbstractFileByPath(file);
 				if ((!currentFile)) {
 					log.debug('Duplicate check Skipping ', file, ' because it\'s not found.');
+					notFoundFiles.push(file);
 					continue;
 				}
 				if (currentFile instanceof TFolder) {
@@ -311,7 +313,7 @@ export class FileOperation {
 				}
 
 			}
-			return duplicates;
+			return { duplicates, notFoundFiles };
 		} catch (Fail) {
 			const errMsg = `File [${fileName}] not found, or is locked. If file exists, Please try again later.`;
 			log.error(Fail, errMsg);
@@ -471,6 +473,11 @@ export class FileOperation {
 	private async syncTasks(file: TFile, tasks: ITask[], bUpdating: boolean): Promise<boolean> {
 		try {
 			const newData = await this.persistToFile(tasks, file, bUpdating);
+			const currentData = await this.readFileContent(file);
+			if (newData === currentData) {
+				log.debug(`No changes to write for ${file.path}, skipping write`);
+				return true;
+			}
 			await this.app.vault.process(file, (data) => {
 				data = newData;
 				return data;
@@ -508,6 +515,9 @@ export class FileOperation {
 
 			let lineText = '';
 			let filePath = fileMap.getFilePath();
+			//Did this task's line actually make it into the file? Only then may we
+			//record a vault sync for it.
+			let bLinePersisted = true;
 
 			lineText = await this.plugin.taskParser?.convertTaskToLine(task, numParentTabs);
 			//Tired of seeing duplicates because of Sync conflicts.
@@ -515,12 +525,17 @@ export class FileOperation {
 				if (fileMap.getTaskIndex(task.id) != -1) {
 					log.warn('A Task was being added but was already in file: ', task.id, task.title);
 					//it's in the file, but not in cache. Just update it.
-					fileMap.updateTask(task, lineText);
-					await this.plugin.taskRepository.upsertTask(task, file.path, Date.now());
+					await this.recordVaultSync(task, file, fileMap.updateTask(task, lineText));
 					continue;
 				} else {
 					fileMap.addTask(task, lineText);
 				}
+			} else if (fileMap.getTaskIndex(task.id) == -1) {
+				//it's in the cache, but not in the file. Just add it.
+				//Mirrors the add branch above: without this the update is a silent
+				//no-op, and the task is then read back as deleted from the vault.
+				log.warn('A Task was being updated but was not in file: ', task.id, task.title);
+				fileMap.addTask(task, lineText);
 			} else {
 				//For updates doing the dateHolder mambo here because we need to make sure we get old dates....
 				const oldTask = await this.plugin.taskRepository.loadTaskById(task.id);
@@ -545,11 +560,14 @@ export class FileOperation {
 						}
 					} else {
 						const bParentUpdate = this.plugin.taskParser?.isParentIdChanged(vaultTask, task);
-						fileMap.updateTask(task, lineText, bParentUpdate);
+						bLinePersisted = fileMap.updateTask(task, lineText, bParentUpdate);
 					}
 				} else {
-					//how would that happen????
+					//how would that happen???? The task has no DB record, so we
+					//never touched the file -- don't record a vault sync that
+					//would make it look user-deleted on the next scan.
 					log.warn('No Old Task found for: ', task.id);
+					bLinePersisted = false;
 				}
 			}
 
@@ -574,8 +592,10 @@ export class FileOperation {
 
 			}
 
-			// Ensure the ticktick tag is in the task's TickTick tags
-			if (!task.tags?.includes('ticktick')) {
+			// Backwards compatibility: keep the "ticktick" tag injected on
+			// the TickTick task unless the user opted out (see
+			// stopInjectingTickTickTag setting).
+			if (!getSettings().stopInjectingTickTickTag && !task.tags?.includes('ticktick')) {
 				task.tags = [...(task.tags || []), 'ticktick'];
 			}
 
@@ -587,7 +607,7 @@ export class FileOperation {
 			} else {
 				if (!bTaskMove) {
 					task.lineHash = lineHash;
-					await this.plugin.taskRepository.upsertTask(task, file.path, Date.now());
+					await this.recordVaultSync(task, file, bLinePersisted);
 				} else {
 					task.lineHash = lineHash;
 					let addedTask = (await this.plugin.tickTickRestAPI?.updateTask(task))!;
@@ -600,6 +620,21 @@ export class FileOperation {
 		const resultLines = fileMap.getFileLines();
 		this.plugin.lastLines.set(file.path, resultLines.length);
 		return resultLines;
+	}
+
+	/**
+	 * Record that a task was synced to the vault -- but only when its line was
+	 * actually written to the file. Recording a vault sync for a write that
+	 * never happened makes the task look user-deleted on the next scan, and it
+	 * gets offered up for deletion in TickTick.
+	 */
+	private async recordVaultSync(task: ITask, file: TFile, bLinePersisted: boolean): Promise<void> {
+		if (bLinePersisted) {
+			await this.plugin.taskRepository.upsertTask(task, file.path, Date.now());
+		} else {
+			log.warn(`Not recording a vault sync for ${task.id}: its line was not written to ${file.path}`);
+			await this.plugin.taskRepository.upsertTask(task);
+		}
 	}
 
 	private hasChildren(currentTask: ITask) {

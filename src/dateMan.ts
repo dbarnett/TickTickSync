@@ -54,7 +54,7 @@ export class DateMan {
 		output: a dateholer struct
 		Called when a task is being examined for changes, or ready for update. (Called from convertLineToTask.)
 	*/
-	parseDates(inString: string): date_holder_type {
+	parseDates(inString: string, timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone): date_holder_type {
 		// log.debug('parseDates: ', inString);
 		let myDateHolder = this.getEmptydateHolder();
 
@@ -73,7 +73,7 @@ export class DateMan {
 
 		for (const [key, value] of Object.entries(date_emoji)) {
 			// log.debug("--", dateEmojiKey, date_emoji[dateEmojiKey]);
-			let dateItem = this.extractDates(key, inString, value);
+			let dateItem = this.extractDates(key, inString, value, timeZone);
 			if (dateItem) {
 				if ((key == 'scheduled_date') || (key == 'startDate')) {
 					if ((fromTime) && (!dateItem.hasATime)) {
@@ -212,16 +212,31 @@ export class DateMan {
 			//Just a task with no dates.
 			(task as { dateHolder: date_holder_type }).dateHolder = dates;
 		} else {
-			if ('dueDate' in task) {
-				dates.dueDate = this.getDateAndTime(task.dueDate, task.isAllDay, date_emoji.dueDate);
-				if (task.dueDate !== task.startDate) {
-					//If they're different also save off the startdate because it's a duration.
-					dates.startDate = this.getDateAndTime(task.startDate, task.isAllDay, date_emoji.startDate);
+			const dueDate = this.getDateAndTime(task.dueDate, task.isAllDay, date_emoji.dueDate);
+			if (dueDate) {
+				dates.dueDate = dueDate;
+			}
+			// TickTick may report empty/null dates for a task that simply has
+			// no date (e.g. a completed task without a due date). Guard against
+			// them -- getDateAndTime returns null for anything empty or invalid,
+			// so an "empty" date can never masquerade as a real one (that used
+			// to surface as 1970-01-01 / 'Invalid Date' and made the plugin
+			// think a date changed on the pull-write-reparse round trip, which
+			// pushed a task update back to TickTick and reset the completion
+			// date -- issue #209).
+			if (task.startDate && task.startDate !== task.dueDate) {
+				//If they're different also save off the startdate because it's a duration.
+				const startDate = this.getDateAndTime(task.startDate, task.isAllDay, date_emoji.startDate);
+				if (startDate) {
+					dates.startDate = startDate;
 				}
 			}
 		}
 		if (task.completedTime) {
-			dates.completedTime = this.getDateAndTime(task.completedTime, false, date_emoji.completedTime);
+			const completedTime = this.getDateAndTime(task.completedTime, false, date_emoji.completedTime);
+			if (completedTime) {
+				dates.completedTime = completedTime;
+			}
 		}
 		//Pick up the times that TickTick doesn't care about, but Obsidian does.
 		if (oldTask && oldTask.dateHolder) {
@@ -321,6 +336,36 @@ export class DateMan {
 		return convertedDate.toISOString().replace(/Z$/, '+0000');
 	}
 
+	// Compute the UTC instant that corresponds to midnight of `dateString`
+	// (YYYY-MM-DD) in the given IANA `timeZone`. Needed for all-day dates:
+	// TickTick interprets an all-day task's date-only value relative to the
+	// task's own timeZone field, not UTC, so a literal UTC midnight is only
+	// correct for UTC-zone users -- everyone west of UTC would see the date
+	// roll back a day. Uses the standard Intl.DateTimeFormat offset trick
+	// since JS Date has no built-in IANA zone support.
+	zonedMidnightToUTC(dateString: string, timeZone: string): Date {
+		const naiveUTC = new Date(`${dateString}T00:00:00.000Z`);
+		const dtf = new Intl.DateTimeFormat('en-US', {
+			timeZone,
+			hourCycle: 'h23',
+			year: 'numeric', month: '2-digit', day: '2-digit',
+			hour: '2-digit', minute: '2-digit', second: '2-digit'
+		});
+		const parts: Record<string, string> = {};
+		for (const part of dtf.formatToParts(naiveUTC)) {
+			parts[part.type] = part.value;
+		}
+		// What UTC instant would produce these same wall-clock digits?
+		// The difference between that and naiveUTC is timeZone's offset
+		// at this instant (DST-aware, since we evaluated at naiveUTC).
+		const asIfUTC = Date.UTC(
+			Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+			Number(parts.hour), Number(parts.minute), Number(parts.second)
+		);
+		const offsetMs = asIfUTC - naiveUTC.getTime();
+		return new Date(naiveUTC.getTime() - offsetMs);
+	}
+
 	utcToLocal(utcDateString: string) {
 		const date = new Date(utcDateString);
 		//Regardless of host date/time format, we want to parse for "en-US" format
@@ -385,9 +430,21 @@ export class DateMan {
 		return myDateHolder;
 	}
 
-	private getDateAndTime(inDate: string, isAllDay: boolean, emoji: string) {
+	private getDateAndTime(inDate: string, isAllDay: boolean, emoji: string): date_time_type | null {
+		if (!inDate) {
+			//Empty or absent date -- never manufacture a real date from it.
+			//A null input parses as the unix epoch and an empty string as
+			//'Invalid Date' otherwise, both of which then masquerade as a real
+			//date on the next comparison.
+			return null;
+		}
+		const parsedDate = new Date(inDate);
+		if (isNaN(parsedDate.getTime())) {
+			log.warn('getDateAndTime: ignoring invalid date', inDate);
+			return null;
+		}
 		let targetDate = this.getEmptyDate();
-		targetDate.isoDate = this.formatDateToISO(new Date(inDate));
+		targetDate.isoDate = this.formatDateToISO(parsedDate);
 		let localDate = this.utcToLocal(inDate);
 		const splitDates = localDate.split(' ');
 		targetDate.date = splitDates[0];
@@ -417,7 +474,7 @@ export class DateMan {
 		return timeString;
 	}
 
-	private extractDates(key: string, inString: string, dateEmoji: date_emoji) {
+	private extractDates(key: string, inString: string, dateEmoji: date_emoji, timeZone: string) {
 
 		let dateItem: date_time_type | null = null;
 		const date_regex = `(${dateEmoji})\\s(\\d{4}-\\d{2}-\\d{2})\\s*(\\d{1,}:\\d{2})*`;
@@ -425,22 +482,19 @@ export class DateMan {
 		let dateData = inString.match(date_regex);
 
 		if (dateData) {
-			let returnDate = null;
+			let returnDate: string;
 			let bhasATime = false;
 			if (!dateData[3]) {
-				// When TT schedules an all day event, it converts the due date to midnight of the next day.
-				// Meaning that when the date is displayed in TT it is reflecting the date adjusted to the time zone
-				// the user is seeing in the User interface, and it .
-				// Likewise in OBS the date is displayed to reflect the local timezone.
-				// In the fullness of time, figure out if there's a way around this.
-				// let timeToSet = '';
-				// if (key == 'dueDate') {
-				// 	timeToSet = '23:59';
-				// } else if ((key == 'scheduled_date') || (key == 'startDate')) {
-				// 	timeToSet = '00:01';
-				// }
-				returnDate = `${dateData[2]}T00:00:00.000`;
+				// TickTick interprets an all-day task's dueDate relative to
+				// the task's own timeZone field, not UTC -- confirmed live
+				// (#366 follow-up, 2026-07-27): a naive UTC midnight showed
+				// up a day early in TickTick's own UI for a UTC-negative
+				// host. Compute the actual UTC instant that corresponds to
+				// midnight of this date in `timeZone`, so it round-trips as
+				// the same calendar day in TickTick's UI regardless of host
+				// OS timezone.
 				bhasATime = false;
+				returnDate = this.formatDateToISO(this.zonedMidnightToUTC(dateData[2], timeZone));
 			} else {
 				if (dateData[3].includes('24:')) {
 					dateData[3] = dateData[3].replace('24:', '00:');
@@ -448,11 +502,10 @@ export class DateMan {
 				let [hours, minutes] = dateData[3].split(':');
 				hours = String(hours).padStart(2, '0');
 				minutes = String(minutes).padStart(2, '0');
-				returnDate = `${dateData[2]}T${hours}:${minutes}`;
 				bhasATime = true;
+				returnDate = this.formatDateToISO(new Date(`${dateData[2]}T${hours}:${minutes}`));
 			}
 
-			returnDate = this.formatDateToISO(new Date(returnDate));
 			dateItem = {
 				hasATime: bhasATime,
 				date: dateData[2],
