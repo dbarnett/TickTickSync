@@ -304,6 +304,13 @@ export class TaskParser {
 		});
 	}
 
+	// Same detection heuristic stripOBSUrl uses to find/remove the link --
+	// mirrored here so isTitleChanged can ask "does this title still have
+	// its Obsidian link" without stripping it.
+	hasOBSUrl(title: string): boolean {
+		return !!title && title.lastIndexOf('.md)') > 0;
+	}
+
 	//Remove Extraneous data from line.
 	getTaskContentFromLineText(lineText: string) {
 		let taskContent = lineText.replace(REGEX.TASK_CONTENT.REMOVE_INLINE_METADATA, '')
@@ -872,8 +879,28 @@ export class TaskParser {
 		const lineTaskTitle = this.stripOBSUrl(lineTask.title);
 		const TickTickTaskTitle = this.stripOBSUrl(TickTickTask.title);
 		//Whether content is modified?
-		const contentModified = (lineTaskTitle.trim() === TickTickTaskTitle.trim());
-		return (!contentModified);
+		const contentMatches = (lineTaskTitle.trim() === TickTickTaskTitle.trim());
+		if (!contentMatches) {
+			return true;
+		}
+
+		// Content matches once the link is stripped from both sides -- but a
+		// change to the link itself (missing entirely, or present but stale/
+		// wrong, e.g. after a file move) is invisible to that check since it
+		// only compares content-minus-link. lineTask.title already carries
+		// the correct current link (computed fresh from this file's path),
+		// so compare the raw, unstripped titles too: any mismatch there
+		// means the TT-side link needs repairing, not just "is one present."
+		if (getSettings().fileLinksInTickTick === 'taskLink') {
+			if (!this.hasOBSUrl(TickTickTask.title)) {
+				return true;
+			}
+			if (lineTask.title.trim() !== TickTickTask.title.trim()) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	//tag compare

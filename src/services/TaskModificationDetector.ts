@@ -25,6 +25,7 @@ import type { LocalTask } from '@/db/schema';
 import { NewFileMap, type ITaskItemRecord, type ITaskRecord } from '@/services/NewFileMap';
 import { FolderSyncService } from '@/services/FolderSyncService';
 import { getSettings } from '@/settings';
+import { consumeRemoteChanged } from '@/sync/conflictTracking';
 import log from '@/utils/logger';
 import ObjectID from 'bson-objectid';
 import { normalizeRepeatFlag } from '@/utils/RecurrenceConverter';
@@ -331,6 +332,19 @@ export class TaskModificationDetector {
 		// TaskParser.preserveTickTickTag).
 		this.plugin.taskParser?.preserveTickTickTag(lineTask, savedTask);
 
+		// Parent detection is indentation-based within the current file's
+		// fileMap. When a task's line moves to a different vault file (with
+		// no parent line alongside it), lineTask.parentId legitimately comes
+		// back empty for that file's context -- that's an artifact of the
+		// move, not the user intentionally removing the parent. Preserve the
+		// last-known parentId in that specific case; a same-file dedent
+		// (genuine intentional un-parenting) is untouched since this only
+		// fires when the file itself changed.
+		const moveCheckForParent = await this.checkForTaskMove(taskId, filepath!);
+		if (moveCheckForParent.moved && !lineTask.parentId && savedTask.parentId) {
+			lineTask.parentId = savedTask.parentId;
+		}
+
 		// Ensure task has required fields
 		if (!savedTask.dateHolder) {
 			this.plugin.dateMan?.addDateHolderToTask(savedTask, undefined);
@@ -464,6 +478,29 @@ export class TaskModificationDetector {
 	): Promise<boolean> {
 		let modified = false;
 
+		// Simultaneous-edit check: did TickTick change one of the same
+		// fields Obsidian is about to push, during this same sync cycle's
+		// pull? If so this isn't "Obsidian edited it," it's a genuine
+		// collision, and blindly pushing Obsidian's copy silently discards
+		// whatever changed on TickTick's side. We still push (no merge logic
+		// here to pick a winner) but surface it loudly rather than let it
+		// happen silently -- see conflictTracking.ts.
+		const remoteChangedFields = consumeRemoteChanged(taskId);
+		if (remoteChangedFields && remoteChangedFields.size > 0) {
+			const pushingFields = [
+				modifications.titleModified && 'title',
+				modifications.priorityModified && 'priority',
+				modifications.statusModified && 'status',
+				modifications.datesModified && (remoteChangedFields.has('dueDate') ? 'dueDate' : remoteChangedFields.has('startDate') ? 'startDate' : undefined),
+			].filter((f): f is string => !!f);
+			const collidingFields = pushingFields.filter(f => remoteChangedFields.has(f));
+			if (collidingFields.length > 0) {
+				const message = `TickTickSync: "${lineTask.title}" was edited on both TickTick and in Obsidian since the last sync (${collidingFields.join(', ')}). Keeping the Obsidian version -- check TickTick if that's not what you wanted.`;
+				log.warn(message);
+				new Notice(message, 10000);
+			}
+		}
+
 		// Preserve timezone
 		lineTask.timeZone = savedTask.timeZone;
 
@@ -530,10 +567,36 @@ export class TaskModificationDetector {
 			if (!modifications.remindersModified) {
 				this.plugin.taskParser?.preserveReminders(lineTask, savedTask);
 			}
-			if (!lineTask.repeatFlag && savedTask.repeatFlag) {
-				lineTask.repeatFlag = savedTask.repeatFlag;
+
+			// TicktickRestAPI.updateTask() sends a whole task object -- the
+			// underlying API wrapper resets any field not present back to a
+			// hardcoded default rather than leaving it alone (src/api/index.ts
+			// updateTask()), so omitting untouched fields is not an option.
+			// Instead, fetch the live server task and overlay only the fields
+			// this sync cycle actually flagged as changed, so untouched fields
+			// reflect current TickTick state rather than a possibly-stale
+			// local (savedTask) snapshot -- see docs/sync-logic.md.
+			const serverTask = await this.plugin.tickTickRestAPI?.getTaskById(taskId, lineTask.projectId) ?? savedTask;
+			const mergedTask: ITask = { ...serverTask, id: lineTask.id, projectId: lineTask.projectId };
+			if (modifications.titleModified) mergedTask.title = lineTask.title;
+			if (modifications.tagsModified) mergedTask.tags = lineTask.tags;
+			if (modifications.datesModified) {
+				mergedTask.dueDate = lineTask.dueDate;
+				mergedTask.startDate = lineTask.startDate;
+				mergedTask.isAllDay = lineTask.isAllDay;
+				mergedTask.timeZone = lineTask.timeZone;
 			}
-			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(lineTask) as ITask;
+			if (modifications.parentIdModified) mergedTask.parentId = lineTask.parentId;
+			if (modifications.priorityModified) mergedTask.priority = lineTask.priority;
+			if (modifications.taskItemsModified) mergedTask.items = lineTask.items;
+			if (modifications.notesModified) {
+				mergedTask.content = lineTask.content;
+				mergedTask.desc = lineTask.desc;
+			}
+			if (modifications.repeatFlagModified) mergedTask.repeatFlag = lineTask.repeatFlag;
+			mergedTask.reminders = lineTask.reminders;
+
+			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(mergedTask) as ITask;
 			updatedTask.dateHolder = saveDateHolder;
 			updatedTask.lineHash = newHash;
 
@@ -544,10 +607,17 @@ export class TaskModificationDetector {
 			this.notifyUserOfChanges(taskId, modifications);
 		}
 
-		// Update hash even if no API call was made
+		// Update hash even if no API call was made. Store it on savedTask, not
+		// lineTask -- lineTask is a fresh reconstruction from the vault line
+		// whose modifiedTime is always stamped to "now" at parse time
+		// (taskParser.ts convertLineToTask), regardless of whether anything
+		// real changed. Writing that in here would silently corrupt this
+		// task's last-known TT modifiedTime on every no-op hash resync,
+		// which conflicts.ts's resolveTaskConflict relies on being accurate
+		// to correctly let a later genuine remote change win a future pull.
 		if (!modified && newHash !== savedTask.lineHash) {
-			lineTask.lineHash = newHash;
-			await this.plugin.taskRepository.upsertTask(lineTask, undefined, Date.now());
+			savedTask.lineHash = newHash;
+			await this.plugin.taskRepository.upsertTask(savedTask, undefined, Date.now());
 		}
 
 		return modified;
