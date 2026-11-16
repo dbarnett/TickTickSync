@@ -590,6 +590,10 @@ export class TaskParser {
 			tags = rawTags.map(raw => raw.toLowerCase().replace(/[/\s]+/g, '-').replace(/-+/g, '-'));
 		}
 
+		// Fork default off (settings.guessProjectAutomatically): a brand-new
+		// task with no TickTick-side project yet goes to the account default
+		// (Inbox) instead of a guessed one -- Project is TickTick-side
+		// metadata only.
 		let projectId = getSettings().defaultProjectId || getSettings().inboxID;
 
 		if (hasParent && parentTaskObject) {

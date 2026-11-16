@@ -60,7 +60,7 @@ vi.mock('@/settings', () => ({
 		inboxID: 'inbox-1',
 		inboxName: 'Inbox',
 		keepProjectFolders: false,
-		guessProjectAutomatically: true,
+		guessProjectAutomatically: false,
 	})),
 	getDefaultFolder: vi.fn(() => ''),
 	updateSettings: vi.fn(),
@@ -105,19 +105,18 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		upsertFile.mockClear();
 	});
 
-	it('maps every project to a file on the very first sync', async () => {
+	it('does not create a vault file for any project on the very first sync', async () => {
 		const { plugin } = makePlugin();
-		const svc = new ProjectSyncService({} as never, plugin as never);
-
+		const svc = new ProjectSyncService(
+			{ vault: { getAbstractFileByPath: () => null, getMarkdownFiles: () => [] } } as never,
+			plugin as never
+		);
 		// A fresh install starts with an empty projects cache.
 		expect(projectsTable.size).toBe(0);
-
 		await svc.saveProjectsToCache(remoteProjects());
-
-		const mapped = upsertFile.mock.calls.map(c => c[0]);
-		expect(mapped).toContain('Work.md');
-		expect(mapped).toContain('Home.md');
-		expect(mapped).toContain('Inbox.md');
+		// Never auto-materialize a vault file just because a TickTick project
+		// exists -- see the class doc comment on ProjectSyncService.
+		expect(upsertFile).not.toHaveBeenCalled();
 	});
 
 	it('does not re-create mappings on subsequent syncs', async () => {
@@ -133,16 +132,19 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		expect(upsertFile).not.toHaveBeenCalled();
 	});
 
-	it('leaves every project resolvable to a file path', async () => {
+	it('leaves a project unresolvable to a file path until a vault file exists for it', async () => {
 		const { plugin } = makePlugin();
-		const svc = new ProjectSyncService({} as never, plugin as never);
+		const svc = new ProjectSyncService(
+			{ vault: { getAbstractFileByPath: () => null, getMarkdownFiles: () => [] } } as never,
+			plugin as never
+		);
 
 		await svc.saveProjectsToCache(remoteProjects());
 
 		const resolve = plugin.fileMetadataService.getFilepathForProjectId;
-		expect(await resolve('proj-a')).toBe('Work.md');
-		expect(await resolve('proj-b')).toBe('Home.md');
-		expect(await resolve('inbox-1')).toBe('Inbox.md');
+		expect(await resolve('proj-a')).toBeUndefined();
+		expect(await resolve('proj-b')).toBeUndefined();
+		expect(await resolve('inbox-1')).toBeUndefined();
 	});
 
 	it('still relocates the file when a project is renamed in TickTick', async () => {
@@ -161,20 +163,20 @@ describe('ProjectSyncService.saveProjectsToCache', () => {
 		expect(updateFilePath).toHaveBeenCalledWith('Work.md', 'Work Stuff.md');
 	});
 
-	it('re-creates a file entry for a cached project whose vault file is gone', async () => {
+	it('does not re-create a file entry for a cached project whose vault file is gone', async () => {
 		const { plugin } = makePlugin();
 		const svc = new ProjectSyncService(
-			{ vault: { getAbstractFileByPath: () => null } } as never,
+			{ vault: { getAbstractFileByPath: () => null, getMarkdownFiles: () => [] } } as never,
 			plugin as never
 		);
 
-		// Project is cached but its vault file was deleted.
-		// The mapping and file should be re-created.
+		// Project is cached but its vault file was deleted by the user -- that's
+		// a deliberate action, not something to silently undo by re-creating it.
 		projectsTable.set('proj-a', { id: 'proj-a', project: { id: 'proj-a', name: 'Work' } as IProject });
 
 		await svc.checkProjectRename('proj-a', 'Work');
 
-		expect(upsertFile).toHaveBeenCalledWith('Work.md', 'proj-a');
+		expect(upsertFile).not.toHaveBeenCalledWith('Work.md', 'proj-a');
 	});
 
 	it('does not create a normal-location file for an archived list', async () => {

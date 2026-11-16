@@ -13,10 +13,12 @@ import { upsertFile, getAllFiles } from '@/db/files';
  * Caches TickTick project id/name metadata for lookups (e.g. resolving a
  * task's projectId to a display name). Whether an unmapped project gets a
  * vault file auto-created for it is controlled by
- * settings.guessProjectAutomatically. Either way, it keeps an
- * already-mapped file's name in sync with a TickTick-side rename, and will
- * adopt an existing vault file (e.g. one already sitting in the
- * archived-lists folder) instead of creating a duplicate.
+ * settings.guessProjectAutomatically (fork default off -- this fork never
+ * infers which note "owns" a project without an explicit user action).
+ * Either way, it keeps an already-mapped file's name in sync with a
+ * TickTick-side rename, and will adopt an existing vault file (e.g. one
+ * already sitting in the archived-lists folder) instead of creating a
+ * duplicate.
  */
 export class ProjectSyncService {
 	app: App;

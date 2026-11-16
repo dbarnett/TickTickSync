@@ -71,8 +71,10 @@ export class OrphanTaskModal extends Modal {
 				});
 			});
 
-		// Offer adding the orphan to a vault file (guessed from the task's
-		// TickTick project) only when the user has opted into that.
+		// Fork default off: adding an orphan to the vault materializes it into
+		// a file guessed from the task's TickTick project, with no explicit
+		// user choice of which note it should live in. Only offer it when
+		// the user has opted into that.
 		if (getSettings().allowAddingOrphanTasksToVault) {
 			setting.addButton(addBtn => {
 				addBtn.setClass('ts_button');

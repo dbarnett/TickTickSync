@@ -6,7 +6,8 @@ import { db } from "@/db/dexie";
 
 // This modal sets a per-file default project; taskParser.ts
 // convertLineToTask only consults it when settings.guessProjectAutomatically
-// is on.
+// is on (fork default off -- see settings.ts). With the setting off, this
+// command runs and saves a value with no effect on new-task routing.
 export class SetDefaultProjectForFileModal extends Modal {
 	defaultProjectId!: string;
 	defaultProjectName!: string;

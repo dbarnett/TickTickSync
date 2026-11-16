@@ -326,9 +326,10 @@ export class TickTickService {
 		}
 
 		// Outside the archived-lists-folder and keepProjectFolders cases
-		// above, only auto-associate a brand-new file with a project whose
-		// name matches the filename when settings.guessProjectAutomatically
-		// is on.
+		// above, a filename happening to match a project's name is not an
+		// explicit user action -- only auto-associate when the user has
+		// opted into that (settings.guessProjectAutomatically, fork default
+		// off).
 		if (matchingProject && getSettings().guessProjectAutomatically) {
 			log.debug(`Auto-associating file with project: ${file.path} -> ${matchingProject.name}`);
 			await upsertFile(file.path, matchingProject.id);

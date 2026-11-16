@@ -414,7 +414,7 @@ describe('TickTickService', () => {
 				tagAndOr: 0,
 				debugMode: false,
 				keepProjectFolders: true,
-				guessProjectAutomatically: true,
+				guessProjectAutomatically: false,
 			});
 			(getDefaultFolder as Mock).mockReturnValue('Projects');
 			(getAllProjects as Mock).mockResolvedValue([
@@ -424,24 +424,28 @@ describe('TickTickService', () => {
 			(mockPlugin as { app: { vault: { getMarkdownFiles: Mock } } }).app.vault.getMarkdownFiles = vi.fn().mockReturnValue([mockMarkdownFile('ProjectA.md')]);
 		});
 
-		it('should auto-associate when keepProjectFolders is disabled', async () => {
-			(getSettings as Mock).mockReturnValue({ keepProjectFolders: false, guessProjectAutomatically: true });
+		it('does not auto-associate by filename when keepProjectFolders is disabled', async () => {
+			(getSettings as Mock).mockReturnValue({ keepProjectFolders: false, guessProjectAutomatically: false });
 
 			await service.ensureVaultFilesRegistered();
 
-			expect(upsertFile).toHaveBeenCalledWith('ProjectA.md', 'proj-a');
+			// A filename happening to match a project's name is not an explicit
+			// user action -- never silently guess the association from it.
+			expect(upsertFile).toHaveBeenCalledWith('ProjectA.md');
+			expect(upsertFile).not.toHaveBeenCalledWith('ProjectA.md', 'proj-a');
 			const folderSync = (mockPlugin as { folderSyncService: { resolveFileLocationConflict: Mock } }).folderSyncService;
 			expect(folderSync.resolveFileLocationConflict).not.toHaveBeenCalled();
 		});
 
-		it('should auto-associate when the file is already at the expected location', async () => {
+		it('does not auto-associate by filename even when the file is already at the expected location', async () => {
 			(mockPlugin as { app: { vault: { getMarkdownFiles: Mock } } }).app.vault.getMarkdownFiles = vi.fn().mockReturnValue([mockMarkdownFile('Projects/ProjectA.md')]);
 			const folderSync = (mockPlugin as { folderSyncService: { getFilePathForProject: Mock } }).folderSyncService;
 			folderSync.getFilePathForProject = vi.fn().mockResolvedValue('Projects/ProjectA.md');
 
 			await service.ensureVaultFilesRegistered();
 
-			expect(upsertFile).toHaveBeenCalledWith('Projects/ProjectA.md', 'proj-a');
+			expect(upsertFile).toHaveBeenCalledWith('Projects/ProjectA.md');
+			expect(upsertFile).not.toHaveBeenCalledWith('Projects/ProjectA.md', 'proj-a');
 			const conflictResolver = (mockPlugin as { folderSyncService: { resolveFileLocationConflict: Mock } }).folderSyncService;
 			expect(conflictResolver.resolveFileLocationConflict).not.toHaveBeenCalled();
 		});

@@ -53,10 +53,18 @@ export interface ITickTickSyncSettings {
 	// from the file's configured default (see modals/DefaultProjectModal.ts)
 	// or a tag that happens to match a project name, instead of the account
 	// default (Inbox).
+	// Fork default off: Project is treated as TickTick-side metadata this
+	// fork never infers or changes from the Obsidian side. An already-
+	// tracked task keeps its real, current project either way (see
+	// taskParser.ts convertLineToTask) -- re-deriving it from file/tag
+	// context on every parse would silently push it back to a guessed
+	// default on the next status/parent change.
 	guessProjectAutomatically: boolean;
 	// Whether the "Orphaned TickTick Tasks" modal offers materializing an
 	// orphan into a vault file guessed from the task's TickTick project, in
 	// addition to deleting it.
+	// Fork default off: this fork never materializes a vault file for a
+	// task the user hasn't explicitly brought in themselves.
 	allowAddingOrphanTasksToVault: boolean;
 
 	debugMode: boolean;
@@ -107,8 +115,8 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	handleArchivedLists: false,
 	handleDeletedLists: false,
 	archivedListsFolder: 'Archived',
-	guessProjectAutomatically: true,
-	allowAddingOrphanTasksToVault: true,
+	guessProjectAutomatically: false,
+	allowAddingOrphanTasksToVault: false,
 
 	inboxID: '',
 	inboxName: 'Inbox',
