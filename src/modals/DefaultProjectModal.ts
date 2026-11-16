@@ -4,7 +4,9 @@ import { getAllProjects } from "@/db/projects";
 import { getAllFiles } from "@/db/files";
 import { db } from "@/db/dexie";
 
-
+// This modal sets a per-file default project; taskParser.ts
+// convertLineToTask only consults it when settings.guessProjectAutomatically
+// is on.
 export class SetDefaultProjectForFileModal extends Modal {
 	defaultProjectId!: string;
 	defaultProjectName!: string;

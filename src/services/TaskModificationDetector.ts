@@ -494,19 +494,11 @@ export class TaskModificationDetector {
 			await this.plugin.taskRepository.upsertTask(lineTask, filepath, Date.now());
 		}
 
-		// Handle project change from tag modification
-		if (modifications.tagsModified && !modifications.projectMoved) {
-			if (lineTask.projectId && savedTask.projectId && lineTask.projectId !== savedTask.projectId) {
-				const { getPausedProjectIds } = await import('@/db/projects');
-				const paused = await getPausedProjectIds();
-				if (paused.has(savedTask.projectId) || paused.has(lineTask.projectId)) {
-					new Notice('Cannot move tasks in or out of a paused list');
-				} else {
-					await this.plugin.tickTickRestAPI?.moveTaskProject(lineTask, savedTask.projectId, lineTask.projectId);
-					modified = true;
-				}
-			}
-		}
+		// Never push a TickTick project change from Obsidian. lineTask.projectId
+		// is a locally-reconstructed guess (see taskParser.ts
+		// convertLineToTask), not a user-expressed intent to move the task --
+		// pushing it here (as tag edits used to) silently churned tasks back
+		// toward the account default on unrelated edits.
 
 		// Handle parent change
 		if (modifications.parentIdModified) {

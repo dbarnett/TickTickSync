@@ -325,13 +325,17 @@ export class TickTickService {
 			}
 		}
 
-		if (matchingProject) {
+		// Outside the archived-lists-folder and keepProjectFolders cases
+		// above, only auto-associate a brand-new file with a project whose
+		// name matches the filename when settings.guessProjectAutomatically
+		// is on.
+		if (matchingProject && getSettings().guessProjectAutomatically) {
 			log.debug(`Auto-associating file with project: ${file.path} -> ${matchingProject.name}`);
 			await upsertFile(file.path, matchingProject.id);
-		} else {
-			log.debug(`Registering file without project association: ${file.path}`);
-			await upsertFile(file.path);
+			return;
 		}
+		log.debug(`Registering file without project association: ${file.path}`);
+		await upsertFile(file.path);
 	}
 
 	async saveProjectsToCache(): Promise<IProject[] | undefined> {

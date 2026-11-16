@@ -43,6 +43,21 @@ export interface ITickTickSyncSettings {
 	// Folder that archived list files are moved into.
 	archivedListsFolder: string;
 
+	// Whether a brand-new task/file may have its TickTick project inferred
+	// from context instead of requiring an explicit mapping. Covers: (1)
+	// auto-creating a vault file for a TickTick project with no file
+	// mapping yet, (2) auto-associating a brand-new vault file with a
+	// project just because its filename matches the project's name (see
+	// ProjectSyncService's class doc comment and services/index.ts
+	// registerNewVaultFile), and (3) a brand-new task picking its project
+	// from the file's configured default (see modals/DefaultProjectModal.ts)
+	// or a tag that happens to match a project name, instead of the account
+	// default (Inbox).
+	guessProjectAutomatically: boolean;
+	// Whether the "Orphaned TickTick Tasks" modal offers materializing an
+	// orphan into a vault file guessed from the task's TickTick project, in
+	// addition to deleting it.
+	allowAddingOrphanTasksToVault: boolean;
 
 	debugMode: boolean;
 	logLevel: string;
@@ -92,6 +107,8 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	handleArchivedLists: false,
 	handleDeletedLists: false,
 	archivedListsFolder: 'Archived',
+	guessProjectAutomatically: true,
+	allowAddingOrphanTasksToVault: true,
 
 	inboxID: '',
 	inboxName: 'Inbox',

@@ -590,19 +590,17 @@ export class TaskParser {
 			tags = rawTags.map(raw => raw.toLowerCase().replace(/[/\s]+/g, '-').replace(/-+/g, '-'));
 		}
 
-		let projectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(filepath);
+		let projectId = getSettings().defaultProjectId || getSettings().inboxID;
 
-		if (hasParent) {
-			if (parentTaskObject) {
-				projectId = parentTaskObject.projectId;
-			}
-		} else {
-			//Check if we need to add this to a specific project by tag.
-			// Use rawTags (pre-resolution) so underscores are preserved for matching
+		if (hasParent && parentTaskObject) {
+			projectId = parentTaskObject.projectId;
+		} else if (getSettings().guessProjectAutomatically) {
+			projectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(filepath) ?? projectId;
+			// Check if we need to add this to a specific project by tag.
+			// Use rawTags (pre-resolution) so underscores are preserved for matching.
 			if (rawTags) {
 				for (const rawTag of rawTags) {
 					const labelName = rawTag.replace(/[/_]/g, ' ');
-
 					const hasProjectId = (await getAllProjects()).find(obj => obj.name.toLowerCase() === labelName.toLowerCase())?.id;
 					if (!hasProjectId) {
 						continue;
@@ -610,6 +608,14 @@ export class TaskParser {
 					projectId = hasProjectId;
 					break;
 				}
+			}
+		} else if (TickTick_id) {
+			// settings.guessProjectAutomatically is off: an already-tracked
+			// task keeps its real, current project instead of having it
+			// re-derived from file/tag context on every parse.
+			const existingTask = await this.plugin.taskRepository?.loadTaskById(TickTick_id);
+			if (existingTask?.projectId) {
+				projectId = existingTask.projectId;
 			}
 		}
 

@@ -414,6 +414,7 @@ describe('TickTickService', () => {
 				tagAndOr: 0,
 				debugMode: false,
 				keepProjectFolders: true,
+				guessProjectAutomatically: true,
 			});
 			(getDefaultFolder as Mock).mockReturnValue('Projects');
 			(getAllProjects as Mock).mockResolvedValue([
@@ -424,7 +425,7 @@ describe('TickTickService', () => {
 		});
 
 		it('should auto-associate when keepProjectFolders is disabled', async () => {
-			(getSettings as Mock).mockReturnValue({ keepProjectFolders: false });
+			(getSettings as Mock).mockReturnValue({ keepProjectFolders: false, guessProjectAutomatically: true });
 
 			await service.ensureVaultFilesRegistered();
 

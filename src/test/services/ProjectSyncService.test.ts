@@ -60,6 +60,7 @@ vi.mock('@/settings', () => ({
 		inboxID: 'inbox-1',
 		inboxName: 'Inbox',
 		keepProjectFolders: false,
+		guessProjectAutomatically: true,
 	})),
 	getDefaultFolder: vi.fn(() => ''),
 	updateSettings: vi.fn(),

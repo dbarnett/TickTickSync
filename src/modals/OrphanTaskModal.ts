@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from 'obsidian';
+import { getSettings } from '@/settings';
 
 export interface OrphanItem {
 	title: string;
@@ -51,7 +52,7 @@ export class OrphanTaskModal extends Modal {
 
 		contentEl.createEl('p', { text: 'What would you like to do with these tasks?', attr: { style: 'margin-bottom: 10px;' } });
 
-		new Setting(contentEl)
+		const setting = new Setting(contentEl)
 			.addButton(cancelBtn => {
 				cancelBtn.setClass('ts_button');
 				cancelBtn.setButtonText('Cancel');
@@ -68,8 +69,12 @@ export class OrphanTaskModal extends Modal {
 					this.action = 'delete';
 					this.close();
 				});
-			})
-			.addButton(addBtn => {
+			});
+
+		// Offer adding the orphan to a vault file (guessed from the task's
+		// TickTick project) only when the user has opted into that.
+		if (getSettings().allowAddingOrphanTasksToVault) {
+			setting.addButton(addBtn => {
 				addBtn.setClass('ts_button');
 				addBtn.setCta();
 				addBtn.setButtonText('Add to file & db');
@@ -78,6 +83,7 @@ export class OrphanTaskModal extends Modal {
 					this.close();
 				});
 			});
+		}
 	}
 
 	onClose() {
