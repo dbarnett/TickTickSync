@@ -1,4 +1,3 @@
-import '@/static/index.css';
 import '@/static/styles.css';
 
 import { type Editor, type MarkdownFileInfo, MarkdownView, Notice, Plugin } from 'obsidian';
@@ -16,6 +15,7 @@ import { TaskParser } from './taskParser';
 import { FileOperation } from './fileOperation';
 
 //import modals
+import { SetDefaultProjectForFileModal } from './modals/DefaultProjectModal';
 import { LatestChangesModal } from './modals/LatestChangesModal';
 import { CleanupDeletedTasksModal } from './modals/CleanupDeletedTasksModal';
 import { RecoverDeletedTasksModal } from './modals/RecoverDeletedTasksModal';
@@ -48,15 +48,13 @@ import { ProjectGroupRepository } from '@/repositories/ProjectGroupRepository';
 import { ProjectSyncService } from '@/services/ProjectSyncService';
 import { EventHandlerService } from '@/services/EventHandlerService';
 import { VaultSyncCoordinator } from '@/services/VaultSyncCoordinator';
+import type { ListLifecycleService } from '@/services/ListLifecycleService';
 import { TaskModificationDetector } from '@/services/TaskModificationDetector';
 import { TaskDeletionHandler } from '@/services/TaskDeletionHandler';
 import { TaskOperationsService } from '@/services/TaskOperationsService';
 import { FolderSyncService } from '@/services/FolderSyncService';
 import { FolderMigrationService } from '@/services/FolderMigrationService';
 import { TagService } from '@/services/TagService';
-
-import { generateDeviceId } from '@/db/device';
-
 
 export default class TickTickSync extends Plugin {
 
@@ -84,6 +82,7 @@ export default class TickTickSync extends Plugin {
 	taskOperationsService!: TaskOperationsService;
 	folderSyncService!: FolderSyncService;
 	folderMigrationService!: FolderMigrationService;
+	listLifecycleService!: ListLifecycleService;
 
 	tickTickRestAPI?: TickTickRestAPI;
 	statusBar?: HTMLElement;
@@ -275,11 +274,18 @@ export default class TickTickSync extends Plugin {
 		//NEW: Initialize services
 		this.projectSyncService = new ProjectSyncService(this.app, this);
 		this.folderSyncService = new FolderSyncService(this.app, this, this.projectGroupRepository);
+		this.projectSyncService.setFolderSyncService(this.folderSyncService);
 		this.folderMigrationService = new FolderMigrationService(this.app, this.folderSyncService);
 		this.vaultSyncCoordinator = new VaultSyncCoordinator(this.app, this, this.folderSyncService);
 		this.taskModificationDetector = new TaskModificationDetector(this.app, this, this.folderSyncService);
 		this.taskDeletionHandler = new TaskDeletionHandler(this.app, this);
 		this.taskOperationsService = new TaskOperationsService(this.app, this);
+
+		// List lifecycle (archived/deleted lists)
+		this.listLifecycleService = new (await import('@/services/ListLifecycleService')).ListLifecycleService(this.app, this, this.folderSyncService);
+		this.projectSyncService?.setFolderSyncService?.(this.folderSyncService);
+		this.listLifecycleService.setFolderSyncService(this.folderSyncService);
+
 
 		// Device ID and Label are now managed in the DB and loaded into memory during initDB
 		// They are no longer stored in settings to prevent sync conflicts
@@ -561,7 +567,7 @@ export default class TickTickSync extends Plugin {
 			await this.synchronizeNow();
 		});
 
-		// //Used for testing adhoc code.
+		//Used for testing adhoc code. -- do not uncomment for production code!
 		// this.addRibbonIcon('check', 'Tts test', async (evt: MouseEvent) => {
 		// 	// Nothing to see here right now.
 		// 	const vaultId = this.app.vault.getName();
@@ -608,11 +614,41 @@ export default class TickTickSync extends Plugin {
 		this.registerEvents();
 		this.reloadInterval();
 
+		// set default project for TickTick task in the current file
+		// This adds an editor command that can perform some operation on the current editor instance
+		this.addCommand({
+			id: 'tts-default-project-for-file',
+			name: 'Set default ticktick project for current file',
+			editorCallback: (editor: Editor, view: MarkdownView | MarkdownFileInfo) => {
+				if (!view || !view.file) {
+					new Notice(`No active file.`);
+					return;
+				}
+				const filepath = view.file.path;
+				new SetDefaultProjectForFileModal(this.app, this, filepath);
+			}
+		});
 		this.addCommand({
 			id: 'tts-sync',
 			name: 'Synchronize',
 			callback: async () => {
 				await this.synchronizeNow();
+			}
+		});
+
+		this.addCommand({
+			id: 'tts-pause-resume-list',
+			name: 'Pause or resume a list',
+			callback: async () => {
+				const lists = await this.listLifecycleService?.getPausableLists() ?? [];
+				if (lists.length === 0) {
+					new Notice('No lists available to pause.');
+					return;
+				}
+				const { PauseResumeListModal } = await import('./modals/PauseResumeListModal');
+				new PauseResumeListModal(this.app, lists, async (list) => {
+					await this.listLifecycleService?.setListPaused(list.id, !list.paused);
+				}).open();
 			}
 		});
 
@@ -674,13 +710,26 @@ export default class TickTickSync extends Plugin {
 			delete data.username;
 			delete data.password;
 		}
+		if ((!data.version) || (isOlder(data.version as string, '1.0.36'))) {
+			//default to AND because that's what we used to do:
+			data.tagAndOr = 1;
+		}
+
 		//BIG Change. BIG I tell you!
-		const isOlderResult = (!data.version) || isOlder(data.version as string, '2.0.0');
-		if (isOlderResult) {
+		if ((!data.version) || isOlder(data.version as string, '2.0.0')) {
 			log.debug('Entering 1.1.17 migration block');
 			// Migrate from legacy data.json repository to Dexie-based repository
 			data.__migratedDBData = migrateFromDataJson(data);
 			log.debug('migrateFromDataJson completed');
+		}
+		if ((!data.version) || (isOlder(data.version as string, '2.0.5'))) {
+			log.debug('Entering 2.0.5 migration block');
+			// New in 2.0.5: opt-in settings for the "#ticktick" control tag.
+			// Historically the plugin force-injected "ticktick" onto every
+			// synced task's TickTick tags. Default off (false) preserves the
+			// legacy behavior for existing installs.
+			data.stopInjectingTickTickTag = false;
+			data.stripTickTickTagOnReset = false;
 		}
 
 		//Build notable changes from the single source of truth

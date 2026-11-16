@@ -15,6 +15,8 @@ export interface ITickTickSyncSettings {
 
 	automaticSynchronizationInterval: number;
 	enableFullVaultSync: boolean;
+	tagAndOr: number; // 1 == And ; 2 == Or
+	SyncProject: string;
 	SyncTag: string;
 	defaultProjectId: string;
 	defaultProjectName: string;
@@ -25,7 +27,45 @@ export interface ITickTickSyncSettings {
 	fileLinksInTickTick: string;
 	taskLinksInObsidian: string;
 	bkupFolder: string;
+	// Opt-in: stop injecting the "#ticktick" control tag as a real TickTick
+	// tag. Historically the plugin force-added "ticktick" to every synced
+	// task's TickTick tags; this lets users stop that behavior.
+	stopInjectingTickTickTag: boolean;
+	// Opt-in (only meaningful with stopInjectingTickTickTag): on a full task
+	// reset, actively strip the legacy "ticktick" tag from existing TickTick
+	// tasks so it gets cleaned up there too.
+	stripTickTickTagOnReset: boolean;
 
+	// Opt-in: ask what to do with lists that were archived in TickTick.
+	handleArchivedLists: boolean;
+	// Opt-in: ask what to do with lists that were deleted in TickTick.
+	handleDeletedLists: boolean;
+	// Folder that archived list files are moved into.
+	archivedListsFolder: string;
+
+	// Whether a brand-new task/file may have its TickTick project inferred
+	// from context instead of requiring an explicit mapping. Covers: (1)
+	// auto-creating a vault file for a TickTick project with no file
+	// mapping yet, (2) auto-associating a brand-new vault file with a
+	// project just because its filename matches the project's name (see
+	// ProjectSyncService's class doc comment and services/index.ts
+	// registerNewVaultFile), and (3) a brand-new task picking its project
+	// from the file's configured default (see modals/DefaultProjectModal.ts)
+	// or a tag that happens to match a project name, instead of the account
+	// default (Inbox).
+	// Fork default off: Project is treated as TickTick-side metadata this
+	// fork never infers or changes from the Obsidian side. An already-
+	// tracked task keeps its real, current project either way (see
+	// taskParser.ts convertLineToTask) -- re-deriving it from file/tag
+	// context on every parse would silently push it back to a guessed
+	// default on the next status/parent change.
+	guessProjectAutomatically: boolean;
+	// Whether the "Orphaned TickTick Tasks" modal offers materializing an
+	// orphan into a vault file guessed from the task's TickTick project, in
+	// addition to deleting it.
+	// Fork default off: this fork never materializes a vault file for a
+	// task the user hasn't explicitly brought in themselves.
+	allowAddingOrphanTasksToVault: boolean;
 
 	debugMode: boolean;
 	logLevel: string;
@@ -54,10 +94,12 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	baseURL: 'ticktick.com',
 	automaticSynchronizationInterval: 300, //default sync interval 300s
 	enableFullVaultSync: false,
+	tagAndOr: 1,
 	debugMode: false,
 	logLevel: 'info',
 	journalRetentionDays: 3,
 	deletedTaskRetentionDays: 7,
+	SyncProject: '',
 	SyncTag: '',
 	defaultProjectId: '',
 	defaultProjectName: 'Inbox',
@@ -68,6 +110,19 @@ export const DEFAULT_SETTINGS: ITickTickSyncSettings = {
 	fileLinksInTickTick: 'taskLink',
 	taskLinksInObsidian: 'taskLink',
 	bkupFolder: '/',
+	// Fork default: this fork's original stop-injecting-the-ticktick-tag fix
+	// (never add/remove, only preserve what's already there) predates
+	// upstream's opt-in setting -- flip the default on to match that
+	// original behavior instead of upstream's opt-in-off default.
+	// stripTickTickTagOnReset stays opt-in: the original fix never actively
+	// stripped the tag, only preserved.
+	stopInjectingTickTickTag: true,
+	stripTickTickTagOnReset: false,
+	handleArchivedLists: false,
+	handleDeletedLists: false,
+	archivedListsFolder: 'Archived',
+	guessProjectAutomatically: false,
+	allowAddingOrphanTasksToVault: false,
 
 	inboxID: '',
 	inboxName: 'Inbox',

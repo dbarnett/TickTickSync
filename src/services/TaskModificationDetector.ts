@@ -41,6 +41,18 @@ export interface TaskModifications {
 	notesModified: boolean;
 	projectMoved: boolean;
 	repeatFlagModified: boolean;
+	remindersModified: boolean;
+}
+
+/**
+ * A task found in a vault file that is neither in the local cache nor on
+ * TickTick. Collected during a sync scan so all such tasks (across all files)
+ * can be confirmed for deletion in a single dialog.
+ */
+export interface PendingTickTickDeletion {
+	file: TFile;
+	filepath: string;
+	lineTask: ITask;
 }
 
 export class TaskModificationDetector {
@@ -89,6 +101,13 @@ export class TaskModificationDetector {
 		// Check if it's a new task (has #ticktick tag but no ID yet)
 		if (!this.plugin.taskParser.hasTickTickId(lineTxt) && this.plugin.taskParser.hasTickTickTag(lineTxt)) {
 			try {
+				const { getPausedProjectIds } = await import('@/db/projects');
+				const paused = await getPausedProjectIds();
+				const defaultProjectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(fileMap.getFilePath());
+				if (defaultProjectId && paused.has(defaultProjectId)) {
+					new Notice('Cannot add tasks to a paused list');
+					return;
+				}
 				// Convert markdown to task object
 				const currentTask = await this.plugin.taskParser.convertLineToTask(
 					lineTxt,
@@ -99,7 +118,11 @@ export class TaskModificationDetector {
 				);
 
 				// Create task in TickTick
-				const newTask = await this.plugin.tickTickRestAPI?.createTask(currentTask) as ITask;
+				const newTask = await this.plugin.tickTickRestAPI?.createTask(currentTask) as ITask | null;
+				if (!newTask) {
+					// createTask already surfaced the API error in a Notice.
+					return;
+				}
 
 				// Handle parent-child relationship
 				if (currentTask.parentId) {
@@ -138,6 +161,10 @@ export class TaskModificationDetector {
 			} catch (error) {
 				log.error('Error adding task:', error);
 				log.error(`The error occurred in file: ${fileMap.getFilePath()}`);
+				new Notice(
+					`Failed to add task to TickTick: ${error instanceof Error ? error.message : String(error)}. The task was not modified.`,
+					8000
+				);
 			}
 		}
 	}
@@ -181,7 +208,8 @@ export class TaskModificationDetector {
 		filepath: string | undefined,
 		lineText: string,
 		lineNumber: number | undefined,
-		fileMap: NewFileMap
+		fileMap: NewFileMap,
+		pendingDeletions?: PendingTickTickDeletion[]
 	): Promise<boolean> {
 		// Only process full tasks here.  taskParser.isTaskItem handles item
 		// identification; note-level content is skipped entirely.
@@ -213,7 +241,8 @@ export class TaskModificationDetector {
 		}
 
 		// Get saved task from database
-		const savedTask = await this.plugin.taskRepository.loadTaskById(taskId);
+		const localTaskRecord = await this.plugin.taskRepository.loadLocalTaskById(taskId);
+		const savedTask = localTaskRecord?.task;
 		if (!savedTask) {
 			// Task not in local DB — check TickTick API before deleting.
 			// Handles the race where a file syncs to this device via external
@@ -225,12 +254,50 @@ export class TaskModificationDetector {
 				return false;
 			}
 
+			if (pendingDeletions) {
+				log.error(`Task ${taskId} not found on TickTick. Queueing for deletion from file ${filepath}`);
+				const file = this.app.vault.getAbstractFileByPath(filepath!);
+				if (!(file instanceof TFile)) { return false; }
+				const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
+				if (lineTask) {
+					pendingDeletions.push({ file, filepath: filepath!, lineTask });
+				}
+				return false;
+			}
+
 			log.error(`Task ${taskId} not found on TickTick. Deleting from file ${filepath}`);
 			new Notice(`Task not found. It will be removed from the file.`);
 			const file = this.app.vault.getAbstractFileByPath(filepath!);
 			if (!(file instanceof TFile)) { return false; }
 			const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
 			await this.plugin.fileOperation?.deleteTaskFromSpecificFile(file, lineTask, true);
+			return false;
+		}
+
+		// A locally deleted task must never be re-imported or pushed back to
+		// TickTick just because its markdown line is still around. Once the DB
+		// has disassociated the task from all files (the "clean DB" action),
+		// also remove the stale line silently.
+		if (localTaskRecord?.deleted) {
+			log.debug(`Skipping line for locally deleted task ${taskId} in ${filepath}`);
+			if (!localTaskRecord.file) {
+				const file = this.app.vault.getAbstractFileByPath(filepath!);
+				if (file instanceof TFile) {
+					const lineTask = await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord);
+					if (lineTask) {
+						await this.plugin.fileOperation?.deleteTaskFromSpecificFile(file, lineTask, false);
+					}
+				}
+			}
+			return false;
+		}
+
+		// A paused list is not synchronized in either direction. Ignore edits to
+		// its tasks; the previous hash is kept so nothing is pushed.
+		const { getPausedProjectIds } = await import('@/db/projects');
+		const pausedProjectIds = await getPausedProjectIds();
+		if (savedTask.projectId && pausedProjectIds.has(savedTask.projectId)) {
+			log.debug(`Ignoring modification of task ${taskId} in paused list ${savedTask.projectId}`);
 			return false;
 		}
 
@@ -260,16 +327,10 @@ export class TaskModificationDetector {
 		// Convert line to task object
 		const lineTask = (await this.plugin.taskParser?.convertLineToTask(lineText, lineNumber!, filepath!, fileMap, taskRecord));
 
-		// convertLineToTask never includes the "ticktick" control tag in
-		// lineTask.tags (it's an Obsidian-side signal, not a real TT tag).
-		// If TickTick already independently has a genuine "ticktick" tag on
-		// this task (per our last-known state), preserve it here so
-		// comparisons/updates don't silently strip it -- we should never
-		// actively add or remove it, only leave whatever's already there.
-		if (savedTask.tags?.some(t => t.toLowerCase() === 'ticktick') &&
-			!lineTask.tags?.some(t => t.toLowerCase() === 'ticktick')) {
-			lineTask.tags = [...(lineTask.tags || []), 'ticktick'];
-		}
+		// If TickTick already has a genuine "ticktick" tag on this task, keep
+		// it so comparisons/updates don't silently strip it (see
+		// TaskParser.preserveTickTickTag).
+		this.plugin.taskParser?.preserveTickTickTag(lineTask, savedTask);
 
 		// Parent detection is indentation-based within the current file's
 		// fileMap. When a task's line moves to a different vault file (with
@@ -302,7 +363,7 @@ export class TaskModificationDetector {
 	/**
 	 * Check entire file for modifications
 	 */
-	async checkFileForModifications(filepath: string | null): Promise<void> {
+	async checkFileForModifications(filepath: string | null, pendingDeletions?: PendingTickTickDeletion[]): Promise<void> {
 		if (!filepath) {
 			return;
 		}
@@ -321,7 +382,7 @@ export class TaskModificationDetector {
 			const line = lines[i];
 			if (this.plugin.taskParser?.isMarkdownTask(line)) {
 				try {
-					await this.checkLineForModifications(filepath, line, i, fileMap);
+					await this.checkLineForModifications(filepath, line, i, fileMap, pendingDeletions);
 				} catch (error) {
 					log.error('Error checking task modification:', error);
 				}
@@ -382,7 +443,8 @@ export class TaskModificationDetector {
 			taskItemsModified: this.plugin.taskParser.areItemsChanged(lineTask.items, savedTask.items),
 			notesModified: this.detectNotesModification(lineTask, savedTask),
 			projectMoved: false, // Will be set separately
-			repeatFlagModified: normalizeRepeatFlag(lineTask.repeatFlag) !== normalizeRepeatFlag(savedTask.repeatFlag)
+			repeatFlagModified: normalizeRepeatFlag(lineTask.repeatFlag) !== normalizeRepeatFlag(savedTask.repeatFlag),
+			remindersModified: this.plugin.taskParser?.areRemindersChanged(lineTask, savedTask) || false
 		};
 	}
 
@@ -442,22 +504,51 @@ export class TaskModificationDetector {
 		// Preserve timezone
 		lineTask.timeZone = savedTask.timeZone;
 
-		// A task's line moving to a different vault file never pushes a
-		// TickTick project change -- Project is never touched from
-		// Obsidian. Just record the new file mapping.
+		// Check for project move
 		const moveCheck = await this.checkForTaskMove(taskId, filepath);
 		if (moveCheck.moved) {
-			modifications.projectMoved = true;
-			modified = true;
+			const { getPausedProjectIds } = await import('@/db/projects');
+			const paused = await getPausedProjectIds();
+			if (paused.has(savedTask.projectId) || paused.has(lineTask.projectId)) {
+				// Only warn for an actual attempt to move the task. An automatic
+				// restore out of a deleted/paused list is re-detected on every
+				// scan and must stay silent.
+				if (!moveCheck.restored) {
+					new Notice('Cannot move tasks in or out of a paused list');
+				}
+			} else if (!moveCheck.restored) {
+				await this.handleProjectMove(lineTask, savedTask, moveCheck.oldFilePath, filepath);
+				modifications.projectMoved = true;
+				modified = true;
+			}
+			// `restored` with the same file path means only the task's project
+			// changed (e.g. it was restored out of a deleted list). Its file is
+			// placed by the vault sync; there is no move to perform or announce.
 
+			// Immediately persist the new file mapping to DB so subsequent API
+			// failures don't leave the local record stale, preventing a sync loop.
 			lineTask.lineHash = newHash;
 			await this.plugin.taskRepository.upsertTask(lineTask, filepath, Date.now());
 		}
 
+		// Never push a TickTick project change from Obsidian. lineTask.projectId
+		// is a locally-reconstructed guess (see taskParser.ts
+		// convertLineToTask), not a user-expressed intent to move the task --
+		// pushing it here (as tag edits used to) silently churned tasks back
+		// toward the account default on unrelated edits.
+
 		// Handle parent change
 		if (modifications.parentIdModified) {
-			await this.handleParentChange(lineTask, savedTask, taskId);
-			modified = true;
+			const { getPausedProjectIds } = await import('@/db/projects');
+			const paused = await getPausedProjectIds();
+			if (paused.has(savedTask.projectId) || paused.has(lineTask.projectId)) {
+				new Notice('Cannot modify tasks in a paused list');
+			} else {
+				const parentChanged = await this.handleParentChange(lineTask, savedTask, taskId);
+				if (parentChanged) {
+					modified = true;
+				}
+			}
 		}
 
 		// Handle status change (complete/incomplete)
@@ -470,6 +561,12 @@ export class TaskModificationDetector {
 		if (this.hasContentChanges(modifications)) {
 			savedTask.modifiedTime = this.plugin.dateMan?.formatDateToISO(new Date());
 			const saveDateHolder = lineTask.dateHolder;
+			// Preserve reminder fields from saved task when the line task lacks
+			// them (and the user didn't explicitly clear/change them with `⏰ off`
+			// or a new `⏰` value).
+			if (!modifications.remindersModified) {
+				this.plugin.taskParser?.preserveReminders(lineTask, savedTask);
+			}
 
 			// TicktickRestAPI.updateTask() sends a whole task object -- the
 			// underlying API wrapper resets any field not present back to a
@@ -497,6 +594,7 @@ export class TaskModificationDetector {
 				mergedTask.desc = lineTask.desc;
 			}
 			if (modifications.repeatFlagModified) mergedTask.repeatFlag = lineTask.repeatFlag;
+			mergedTask.reminders = lineTask.reminders;
 
 			const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(mergedTask) as ITask;
 			updatedTask.dateHolder = saveDateHolder;
@@ -537,7 +635,8 @@ export class TaskModificationDetector {
 			modifications.taskItemsModified ||
 			modifications.notesModified ||
 			modifications.projectMoved ||
-			modifications.repeatFlagModified;
+			modifications.repeatFlagModified ||
+			modifications.remindersModified;
 	}
 
 	/**
@@ -545,11 +644,58 @@ export class TaskModificationDetector {
 	 */
 	private async checkForTaskMove(taskId: string, currentPath: string): Promise<{
 		moved: boolean;
-		oldFilePath: string
+		oldFilePath: string;
+		restored: boolean;
 	}> {
 		const oldFilePath = await this.plugin.fileMetadataService.getFilepathForTask(taskId);
-		const moved = !!(oldFilePath && oldFilePath !== currentPath);
-		return { moved, oldFilePath: oldFilePath || '' };
+		let moved = !!(oldFilePath && oldFilePath !== currentPath);
+		// `restored` marks a task that was automatically restored out of a
+		// deleted/paused list. It is a consequence of the list lifecycle, not a
+		// user-requested move, so it must not trigger move warnings.
+		let restored = false;
+		if (!moved && oldFilePath) {
+			try {
+				const { getFile } = await import('@/db/files');
+				const { db } = await import('@/db/dexie');
+				const fileRecord = await getFile(oldFilePath);
+				const oldProjectId = fileRecord?.defaultProjectId;
+				if (oldProjectId) {
+					const lt = await db.tasks.where('taskId').equals(taskId).first();
+					// The task's project no longer matches the project that owns the
+					// file it still lives in: it was restored into another list.
+					if (lt?.task?.projectId && lt.task.projectId !== oldProjectId) {
+						moved = true;
+						restored = true;
+					}
+				}
+			} catch {
+				// ignore
+			}
+		}
+		return { moved, oldFilePath: oldFilePath || '', restored };
+	}
+
+	/**
+	 * Handle task moving between projects/files
+	 * Also checks if project groups differ and moves file if necessary
+	 */
+	private async handleProjectMove(newTask: ITask, oldTask: ITask, oldPath: string, newPath: string): Promise<void> {
+		// Nothing actually moved: same file and same project. Never announce a
+		// no-op move (e.g. "moved from X.md to X.md").
+		if (oldPath === newPath && oldTask.projectId === newTask.projectId) {
+			return;
+		}
+		const { getPausedProjectIds } = await import('@/db/projects');
+		const paused = await getPausedProjectIds();
+		if (paused.has(oldTask.projectId) || paused.has(newTask.projectId)) {
+			new Notice('Cannot move tasks in or out of a paused list');
+			return;
+		}
+		await this.plugin.tickTickRestAPI?.moveTaskProject(newTask, oldTask.projectId, newTask.projectId);
+
+		const message = `Task ${newTask.id} moved from ${oldPath} to ${newPath}`;
+		new Notice(message, 5000);
+		log.debug(message);
 	}
 
 	/**
@@ -592,16 +738,45 @@ export class TaskModificationDetector {
 
 	/**
 	 * Handle task parent change (subtask hierarchy)
+	 * @returns true when the parent relationship actually changed and was applied
 	 */
-	private async handleParentChange(lineTask: ITask, savedTask: ITask, taskId: string): Promise<void> {
+	private async handleParentChange(lineTask: ITask, savedTask: ITask, taskId: string): Promise<boolean> {
+		const oldParentId = savedTask.parentId?.trim() ?? '';
+		const newParentId = lineTask.parentId?.trim() ?? '';
+
+		// Nothing to do when the parent id is unchanged. Keeping this guard here
+		// prevents a no-op move and a misleading "none" -> "none" notice.
+		if (oldParentId === newParentId) {
+			log.debug(`Task ${taskId} parent unchanged (${newParentId || 'none'}); skipping parent move`);
+			return false;
+		}
+
 		await this.plugin.tickTickRestAPI?.moveTaskParent(taskId, savedTask.parentId, lineTask.parentId, lineTask.projectId);
 
-		const oldParent = await this.plugin.taskRepository.loadTaskById(savedTask.parentId);
-		const newParent = await this.plugin.taskRepository.loadTaskById(lineTask.parentId);
+		const oldParent = oldParentId ? await this.plugin.taskRepository.loadTaskById(oldParentId) : undefined;
+		const newParent = newParentId ? await this.plugin.taskRepository.loadTaskById(newParentId) : undefined;
 
-		const message = `Task ${taskId} parent changed from "${oldParent?.title || 'none'}" to "${newParent?.title || 'none'}"`;
+		const oldLabel = this.formatParentLabel(oldParentId, oldParent);
+		const newLabel = this.formatParentLabel(newParentId, newParent);
+
+		const message = `Task ${taskId} parent changed from "${oldLabel}" to "${newLabel}"`;
 		new Notice(message, 5000);
 		log.debug(message);
+		return true;
+	}
+
+	/**
+	 * Build a readable label for a parent task, falling back to the id when the
+	 * parent is not in the local cache (or has no title). This keeps real parent
+	 * changes distinguishable instead of rendering as "none" -> "none".
+	 */
+	private formatParentLabel(parentId: string, parent: ITask | undefined): string {
+		if (!parentId) {
+			return 'none';
+		}
+
+		const title = parent?.title?.trim();
+		return title ? `${title} (${parentId})` : parentId;
 	}
 
 	/**
@@ -672,6 +847,15 @@ export class TaskModificationDetector {
 
 		const newItem = this.plugin.taskParser?.taskFromLine(lineText);
 		const parentTask = await this.plugin.taskRepository.loadTaskById(parentID);
+
+		if (parentTask?.projectId) {
+			const { getPausedProjectIds } = await import('@/db/projects');
+			const paused = await getPausedProjectIds();
+			if (paused.has(parentTask.projectId)) {
+				log.debug(`Ignoring sub-task change in paused list ${parentTask.projectId}`);
+				return false;
+			}
+		}
 
 		if (parentTask && parentTask.items) {
 			if (itemId) {

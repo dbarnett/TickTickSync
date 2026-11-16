@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from 'obsidian';
+import { getSettings } from '@/settings';
 
 export interface OrphanItem {
 	title: string;
@@ -6,7 +7,7 @@ export interface OrphanItem {
 	projectName?: string;
 }
 
-export type OrphanAction = 'delete' | 'cancel';
+export type OrphanAction = 'add' | 'delete' | 'cancel';
 
 export class OrphanTaskModal extends Modal {
 	title = 'Orphaned TickTick Tasks';
@@ -51,7 +52,7 @@ export class OrphanTaskModal extends Modal {
 
 		contentEl.createEl('p', { text: 'What would you like to do with these tasks?', attr: { style: 'margin-bottom: 10px;' } });
 
-		new Setting(contentEl)
+		const setting = new Setting(contentEl)
 			.addButton(cancelBtn => {
 				cancelBtn.setClass('ts_button');
 				cancelBtn.setButtonText('Cancel');
@@ -69,6 +70,22 @@ export class OrphanTaskModal extends Modal {
 					this.close();
 				});
 			});
+
+		// Fork default off: adding an orphan to the vault materializes it into
+		// a file guessed from the task's TickTick project, with no explicit
+		// user choice of which note it should live in. Only offer it when
+		// the user has opted into that.
+		if (getSettings().allowAddingOrphanTasksToVault) {
+			setting.addButton(addBtn => {
+				addBtn.setClass('ts_button');
+				addBtn.setCta();
+				addBtn.setButtonText('Add to file & db');
+				addBtn.onClick(() => {
+					this.action = 'add';
+					this.close();
+				});
+			});
+		}
 	}
 
 	onClose() {

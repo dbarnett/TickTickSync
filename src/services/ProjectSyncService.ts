@@ -1,24 +1,39 @@
-import { App, Notice } from 'obsidian';
+import { App, Notice, TFile, TFolder } from 'obsidian';
 import type TickTickSync from '@/main';
 import type { IProject } from '@/api/types/Project';
+import type { FolderSyncService } from '@/services/FolderSyncService';
 import { FoundDuplicateListsModal } from '@/modals/FoundDuplicateListsModal';
-import { getSettings } from '@/settings';
+import { getDefaultFolder, getSettings } from '@/settings';
 import log from '@/utils/logger';
 import { db } from '@/db/dexie';
+import { getAllProjects, getLocalProjectById, isProjectArchived } from '@/db/projects';
+import { upsertFile, getAllFiles } from '@/db/files';
 
+/**
+ * Caches TickTick project id/name metadata for lookups (e.g. resolving a
+ * task's projectId to a display name). Whether an unmapped project gets a
+ * vault file auto-created for it is controlled by
+ * settings.guessProjectAutomatically (fork default off -- this fork never
+ * infers which note "owns" a project without an explicit user action).
+ * Either way, it keeps an already-mapped file's name in sync with a
+ * TickTick-side rename, and will adopt an existing vault file (e.g. one
+ * already sitting in the archived-lists folder) instead of creating a
+ * duplicate.
+ */
 export class ProjectSyncService {
 	app: App;
 	plugin: TickTickSync;
+	folderSyncService?: FolderSyncService;
 
 	constructor(app: App, plugin: TickTickSync) {
 		this.app = app;
 		this.plugin = plugin;
 	}
 
-	// Caches TickTick project id/name metadata for lookups (e.g. resolving a
-	// task's projectId to a display name). Deliberately does NOT materialize
-	// or rename vault files per project -- Project is TickTick-side metadata
-	// only, never something this plugin should be moving/creating files for.
+	setFolderSyncService(service: FolderSyncService): void {
+		this.folderSyncService = service;
+	}
+
 	async saveProjectsToCache(projects: IProject[]): Promise<boolean> {
 		try {
 			const inboxProject = {
@@ -42,8 +57,12 @@ export class ProjectSyncService {
 				return false;
 			}
 
-			const localProjects = projects.map(p => ({ id: p.id, project: p }));
-			await db.projects.bulkPut(localProjects);
+			for (const project of projects) {
+				await this.checkProjectRename(project.id, project.name, project)
+			}
+
+			const { upsertProjectsPreservingState } = await import('@/db/projects');
+			await upsertProjectsPreservingState(projects);
 
 			return true;
 		} catch (error) {
@@ -51,6 +70,190 @@ export class ProjectSyncService {
 			new Notice(`error on save projects: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		return false;
+	}
+
+	async checkProjectRename(ttProjectId: string, ttProjectName: string, ttProject?: IProject): Promise<void> {
+		const fileMetadatas = await this.plugin.fileMetadataService.getAllFileMetadata();
+		if (!fileMetadatas) return;
+		const projects = await getAllProjects();
+
+		const project = projects.find(p => p.id === ttProjectId);
+		// A project needs a file mapping whether it is brand new to us or was
+		// cached before we ever managed to map it to a file (first run: the
+		// projects cache is populated in the same pass, so nothing ever looks
+		// "new" again and the mapping would never be created).
+		const mappedPath = await this.plugin.fileMetadataService.getFilepathForProjectId(ttProjectId);
+
+		// Archived/deleted/paused lists keep their file where it is. Never
+		// create or relocate a normal-location file for them: doing so produces
+		// duplicates next to the archived copy.
+		const localProject = await getLocalProjectById(ttProjectId);
+		const isFrozen = !!localProject?.archived
+			|| !!localProject?.deleted
+			|| !!localProject?.syncPaused
+			|| !!localProject?.userPaused
+			|| (ttProject ? isProjectArchived(ttProject) : false);
+
+		if (!mappedPath) {
+			let newFilePath: string;
+			const folder = getDefaultFolder();
+			const sanitize = (name: string): string =>
+				name.replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+			const safeProjectName = sanitize(ttProjectName);
+
+			if (getSettings().keepProjectFolders && ttProject?.groupId) {
+				const group = await db.projectGroups.get(ttProject.groupId);
+				const groupName = group?.group?.name;
+				if (groupName && groupName.trim().length > 0) {
+					const safeGroupName = sanitize(groupName);
+					const base = (folder ? folder + "/" : "");
+					newFilePath = `${base}${safeGroupName}/${safeProjectName}.md`;
+				} else {
+					newFilePath = (folder ? folder + "/" : "") + safeProjectName + '.md';
+				}
+			} else {
+				newFilePath = (folder ? folder + "/" : "") + safeProjectName + '.md';
+			}
+
+			// A file for this list may already exist (most importantly in the
+			// archived-lists folder). Adopt it instead of creating a second
+			// file at the normal location.
+			const existingFile = this.findExistingProjectFile(safeProjectName, newFilePath);
+			if (existingFile) {
+				log.debug(`Unmapped project: ${ttProjectName} (${ttProjectId}). Adopting existing file: ${existingFile.path}`);
+				await upsertFile(existingFile.path, ttProjectId);
+				return;
+			}
+
+			if (!getSettings().guessProjectAutomatically || isFrozen) {
+				log.debug(`Unmapped project: ${ttProjectName} (${ttProjectId}). Not creating a vault file for it.`);
+				return;
+			}
+
+			const vaultFile = this.app?.vault?.getAbstractFileByPath ? this.app.vault.getAbstractFileByPath(newFilePath) : undefined;
+
+			log.debug(`Unmapped project: ${ttProjectName} (${ttProjectId}). Creating file entry: ${newFilePath}`);
+			await upsertFile(newFilePath, ttProjectId);
+
+			// Create the vault file if it doesn't exist yet
+			if (!(vaultFile instanceof TFile)) {
+				try {
+					let normalizedPath = newFilePath;
+					if (normalizedPath.startsWith('/')) {
+						normalizedPath = normalizedPath.substring(1);
+					}
+
+					const parentPath = normalizedPath.includes('/') ? normalizedPath.substring(0, normalizedPath.lastIndexOf('/')) : '';
+					if (parentPath) {
+						const parts = parentPath.split('/').filter(Boolean);
+						let current = '';
+						for (const part of parts) {
+							current = current ? `${current}/${part}` : part;
+							const folder = this.app.vault.getAbstractFileByPath(current);
+							if (!folder) {
+								log.debug(`Creating folder: ${current}`);
+								await this.app.vault.createFolder(current);
+							} else if (!(folder instanceof TFolder)) {
+								log.error(`Path conflict: ${current} exists and is not a folder`);
+								return;
+							}
+						}
+					}
+
+					const whoAdded = `${this.plugin.manifest.name} -- ${this.plugin.manifest.version}`;
+					log.debug(`Creating vault file: ${normalizedPath}`);
+					await this.app.vault.create(normalizedPath, `== Added by ${whoAdded} == `);
+				} catch (error) {
+					if ((error as Error).message?.includes('File already exists')) {
+						log.debug(`File already exists: ${newFilePath}`);
+					} else {
+						log.error(`Error creating vault file ${newFilePath}:`, error);
+					}
+				}
+			}
+
+			return;
+		}
+
+		// A rename would drag an archived/paused file out of its current folder.
+		if (isFrozen) {
+			log.debug(`Skipping rename/relocation for archived/deleted/paused list: ${ttProjectName} (${ttProjectId})`);
+			return;
+		}
+
+		if (project && project.name !== ttProjectName) {
+			log.debug(`Project Name Changed from ${project?.name} to ${ttProjectName}`)
+
+			const files = await getAllFiles();
+			const currentFile = files.find(f => f.defaultProjectId === ttProjectId);
+
+			let currentFilePath;
+
+			if (!currentFile) {
+				log.debug(`No file found for project ${ttProjectId}`);
+				currentFilePath = await this.plugin.fileMetadataService.getFilepathForProjectId(ttProjectId);
+				log.debug(`currentFilePath: ${currentFilePath}`);
+				if (!currentFilePath) {
+					log.debug(`No file found for project ${ttProjectId} and no default file found`);
+					return
+				}
+			} else {
+				currentFilePath = currentFile.path;
+			}
+
+			let newFilePath: string;
+			if (this.folderSyncService) {
+				newFilePath = await this.folderSyncService.getFilePathForProject(ttProjectId, ttProjectName, ttProject?.groupId);
+			} else {
+				const folder = getDefaultFolder();
+				const safeProjectName = ttProjectName.replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+				newFilePath = (folder ? folder + "/" : "") + safeProjectName + '.md';
+			}
+
+			log.debug(`Renaming project file from ${currentFilePath} to ${newFilePath}`);
+
+			if (currentFilePath !== newFilePath) {
+				const vaultFile = this.app.vault.getAbstractFileByPath(currentFilePath);
+				if (vaultFile && vaultFile instanceof TFile) {
+					log.debug(`Renaming ${currentFilePath} to ${newFilePath}`);
+					await this.app.vault.rename(vaultFile, newFilePath);
+					log.debug(`Updating file path in database from ${currentFilePath} to ${newFilePath}`);
+					await this.plugin.fileMetadataService.updateFilePath(currentFilePath, newFilePath);
+				} else {
+					log.warn(`File ${currentFilePath} not found in vault, updating database only`);
+					await this.plugin.fileMetadataService.updateFilePath(currentFilePath, newFilePath);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Look for an existing file that already represents this list. Besides the
+	 * expected normal location, check the archived-lists folder: an archived
+	 * file must be adopted instead of creating a duplicate normal-location file.
+	 */
+	private findExistingProjectFile(safeProjectName: string, expectedPath: string): TFile | undefined {
+		const vault = this.app?.vault;
+		if (!vault?.getAbstractFileByPath) return undefined;
+
+		const expected = vault.getAbstractFileByPath(expectedPath);
+		if (expected instanceof TFile) return expected;
+
+		const archivedFolder = (getSettings().archivedListsFolder || 'Archived')
+			.replace(/\\/g, '/')
+			.replace(/^\/+|\/+$/g, '');
+		if (!archivedFolder) return undefined;
+
+		const direct = vault.getAbstractFileByPath(`${archivedFolder}/${safeProjectName}.md`);
+		if (direct instanceof TFile) return direct;
+
+		const markdownFiles = vault.getMarkdownFiles?.() ?? [];
+		const lowerName = safeProjectName.toLowerCase();
+		const lowerFolder = archivedFolder.toLowerCase();
+		return markdownFiles.find(file =>
+			file.basename.toLowerCase() === lowerName &&
+			file.path.toLowerCase().startsWith(`${lowerFolder}/`)
+		);
 	}
 
 	private async showFoundDuplicatesModal(app: App, plugin: TickTickSync, projects: IProject[]) {

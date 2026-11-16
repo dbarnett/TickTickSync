@@ -4,6 +4,50 @@
 
 ## Notable Changes
 
+### 2.0.15 → 2.0.16 — Archived & Deleted List Handling { #2.0.16 }
+
+- **Pause a list manually at any time** — pause or resume any active list from **Sync Control → List lifecycle → Paused lists** or with the **Pause or resume a list** command. Paused lists are not synced in either direction, disappear from project dropdowns, and their files stay where they are. Edits made to tasks while a list is paused are kept in the file and sync on the next scheduled or manual sync after you resume it.
+- **Archived, deleted and paused lists stop syncing** — a list archived in TickTick (or deleted there, or paused by you) is left alone: no pulls, pushes, moves, dropdown entries or folder reorganization. Handling is opt-in under **Sync Control → List Lifecycle**, and archived files can be collected in a folder of your choice (default `Archived`). Tasks from a deleted list are treated as moved without showing move notifications.
+- **Unarchiving a list puts its file back** — the file returns to the list's current location. If a file already exists there, you choose to move and merge, delete one of the two files, or skip; a skipped restore is retried silently once the conflict is gone.
+- **Trashing a deleted list's file cleans the database** — its tasks are removed rather than moved to the default project, with no move notifications.
+- **New lists appear immediately in project dropdowns** — lists created in TickTick, even ones without tasks, can be selected under **Sync Control** without waiting for a sync.
+- **Task display settings hold in Live Preview and Reading mode** - link, ID and tag visibility stays applied while editing, and nested subtasks no longer hide their parent's metadata.
+- **Parent-change notices show the real parent** - when a task's parent changes, the notice now shows the parent's title and id instead of repeating `none`, falls back to the id when the parent isn't cached, and stays silent when the parent relationship didn't actually change (#404).
+- **Parent changes made in TickTick are announced** - when a task is re-parented in TickTick, the vault update now shows one notice per affected file naming the new parent instead of changing the file silently. Paused, archived and deleted lists remain silent.
+- General stability and performance improvements
+
+### 2.0.10 → 2.0.15 — Sync, Reminder & Tag Fixes { #2.0.15 }
+
+- **Missing project files are re-created on sync** instead of their tasks being deleted (#386)
+- **Sync checkpoints persist after errors**, and files no longer gain stray blank lines when a sync has nothing to add (#383)
+- **Android reminders fixed** — reminder IDs are now generated so reminders sync correctly on mobile
+- **Hyphens in tags are handled correctly**
+- **Task link setting is honored** when setting the task title during sync
+- **Runs alongside other Dexie-based plugins** (e.g. Omnisearch) — no more "Two different versions of Dexie loaded" plugin failure
+- General stability and performance improvements
+
+### 2.0.8 → 2.0.10 — Reminder Creation from Obsidian { #2.0.10 }
+
+- **Create tasks with reminders** — writing `⏰ 30m` on a new Obsidian task now creates it in TickTick with the reminder set (previously reminders were only pulled from TickTick, not pushed on create). See [Task Format](task-format.md#reminders).
+- **Multiple reminders round-trip correctly** — reminders synced from TickTick are fully preserved when editing the task in Obsidian, including their IDs and trigger values.
+
+### 2.0.5 → 2.0.8 — Misplaced File Conflict Resolution & Sync Fixes { #2.0.8 }
+
+- **Misplaced project files are now resolved instead of duplicated** — when a new vault file matches a project by name but is located outside the expected folder, you're asked how to proceed: move it to the correct location (merging the two files if one already exists), delete the misplaced file, delete the file at the correct location, or skip (leaves the file unassociated)
+- **Reminders** — set TickTick reminders from Obsidian with the `⏰` emoji plus a relative duration (`⏰ 30m`, `⏰ 1d`, `⏰ 0m` for on time, `⏰ off` to clear). Multiple `⏰` tokens add multiple reminders. Editing a task without `⏰` no longer wipes reminders set in the TickTick app. See [Task Format](task-format.md#reminders).
+- **Aggregated deletions** — tasks missing from TickTick are now grouped into a single confirmation dialog
+- **Project rename safety** — guard added so a renamed project can't be mistaken for a moved project
+- General stability and performance improvements
+
+### 2.0.1 → 2.0.5 — Sync Fixes & TickTick Tag Handling { #2.0.5 }
+
+- **Fresh installs now sync correctly** — tasks pulled from TickTick appear in your vault from the very first sync (project-to-file mapping is created automatically)
+- **All-day task dates no longer drift** — due dates on all-day tasks could shift by a day on each sync in some timezones; now stable
+- **TickTick tag handling is now configurable** — new settings under **Task Display** let you stop injecting the `ticktick` tag onto TickTick tasks, and strip the legacy tag when you reset your tasks
+- **Better documentation** — sync timing, conflict handling, and known TickTick quirks are now covered in the docs
+- **Make settings 1.13.x compatible** 
+- General stability and performance improvements
+
 ### 1.1.7 → 2.0.1 { #2.0.1 }
 
 - Complete re-architecture for better cross-device handling

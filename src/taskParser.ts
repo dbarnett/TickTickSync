@@ -1,11 +1,13 @@
-import { type App } from 'obsidian';
+import { type App, type MetadataCache, Notice } from 'obsidian';
 import type TickTickSync from '@/main';
-import type { ITask, ITaskItem } from '@/api/types/Task';
+import type { ITask, ITaskItem, Reminder } from '@/api/types/Task';
 import { getSettings } from '@/settings';
 import { sha256 } from 'crypto-hash';
 import type { NewFileMap, ITaskRecord } from '@/services/NewFileMap';
 import { getAllProjects } from '@/db/projects';
+import type { TagService } from '@/services/TagService';
 import { tasksTextToRRule, rruleToTasksText } from '@/utils/RecurrenceConverter';
+import { normalizeTrigger, parseReminderText, secondsToShorthand, triggerToSeconds } from '@/utils/ReminderConverter';
 import log from '@/utils/logger';
 
 const prioritySymbols = {
@@ -31,7 +33,8 @@ const keywords = {
 	TASK_DUE_DATE: '📅',
 	TASK_COMPLETE: '✅',
 	RECURRENCE: '🔁',
-	ALL_TASK_EMOJI: '➕|⏳|🛫|📅|✅|❌|🔁',
+	REMINDER: '⏰',
+	ALL_TASK_EMOJI: '➕|⏳|🛫|📅|✅|❌|🔁|⏰',
 	// priorityIcons: "⏬|🔽|🔼|⏫|🔺",
 	priority: `\\s([\u{23EC}\u{1F53D}\u{1F53C}\u{23EB}\u{1F53A}])\\s`
 };
@@ -100,7 +103,8 @@ export const REGEX = {
 		REMOVE_DATE: new RegExp(due_date_strip_regex, 'gum'),
 		REMOVE_COMPLETION_DATE: new RegExp(completion_date_strip_regex, 'gmu'),
 		REMOVE_INLINE_METADATA: /%%\[\w+::\s*\w+\]%%/g,
-		REMOVE_RECURRENCE: /🔁\s+[^🔁➕⏳🛫📅✅❌\n]+/gu,
+		REMOVE_RECURRENCE: /🔁\s+[^🔁➕⏳🛫📅✅❌⏰\n]+/gu,
+		REMOVE_REMINDER: /⏰\s+[^⏰➕⏳🛫📅✅❌🔁🔺⏫🔼🔽⏬\n]+/gu,
 		REMOVE_CHECKBOX: /^(-|\*)\s+\[(x|X| )\]\s/,
 		REMOVE_CHECKBOX_WITH_INDENTATION: /^([ \t]*)?(-|\*)\s+\[(x|X| )\]\s/,
 		REMOVE_TickTick_LINK: /\[link\]\(.*?\)/
@@ -112,7 +116,8 @@ export const REGEX = {
 	TASK_PRIORITY: new RegExp(keywords.priority, 'u'),
 	priorityRegex: /^.*([🔺⏫🔼🔽⏬]).*$/u,
 	BLANK_LINE: /^\s*$/,
-	RECURRENCE_RULE: /🔁\s+([^🔁➕⏳🛫📅✅❌]+?)(?=\s*[➕⏳🛫📅✅❌]|\s*$)/u,
+	RECURRENCE_RULE: /🔁\s+([^🔁➕⏳🛫📅✅❌⏰]+?)(?=\s*[➕⏳🛫📅✅❌⏰]|\s*$)/u,
+	REMINDER_RULE: /⏰\s+([^⏰➕⏳🛫📅✅❌🔁🔺⏫🔼🔽⏬\n]+?)(?=\s*(?:[➕⏳🛫📅✅❌🔁⏰🔺⏫🔼🔽⏬]|#|%%|\[)|\s*$)/gu,
 	TickTick_EVENT_DATE: /(\d{4})-(\d{2})-(\d{2})/,
 	ITEM_LINE: /\[(.*?)\]\s*(.*?)\s*%%(.*?)%%/,
 	LINE_ITEM_ID: /%%(?!\[ticktick_id::\s)[a-f0-9]{24}%%/g
@@ -151,6 +156,13 @@ export class TaskParser {
 
 		resultLine = this.addTickTickId(resultLine, task.id);
 
+		//add reminders
+		//Reminders are not a signifier emoji the Obsidian Tasks plugin
+		//understands. Tasks reads back from the end of the line and stops at
+		//unrecognized text, so `⏰ ...` must be emitted *before* the priority /
+		//recurrence / date cluster or those emojis would be unreadable.
+		resultLine = this.addRemindersToLine(resultLine, task);
+
 		//add priority
 		resultLine = this.addPriorityToLine(resultLine, task);
 
@@ -184,26 +196,112 @@ export class TaskParser {
 		return resultLine;
 	}
 
-	stripOBSUrl(title: string): string {
+	stripOBSUrl(title: string | undefined): string {
 		//TODO: this is ugly but I can't find a clean regex to make it happen.
 		let result = title;
 		if (result) {
-			let eoURL = title.lastIndexOf('.md)');
+			let eoURL = result.lastIndexOf('.md)');
 			let boURL = 0;
 			if (eoURL > 0) {
 				for (let i = eoURL; i > 0; i--) {
-					if (title[i] === '[') {
+					if (result[i] === '[') {
 						boURL = i;
 						break;
 					}
 				}
 				if (boURL > 0) {
-					result = title.substring(0, boURL);
-					result = result + title.substring(eoURL + 4); //magic number is len of .md + 1
+					result = result.substring(0, boURL);
+					result = result + result.substring(eoURL + 4); //magic number is len of .md + 1
 				}
 			}
 		}
-		return result.trim();
+		return (result ?? '').trim();
+	}
+
+	//Append `⏰ <shorthand>` tokens for each relative reminder, e.g. `⏰ 30m`.
+	//Reminders whose trigger isn't a relative lead time (absolute date-times)
+	//can't be round-tripped and are omitted from the line.
+	addRemindersToLine(resultLine: string, task: ITask): string {
+		if (!task.reminders?.length) {
+			return resultLine;
+		}
+		for (const reminder of task.reminders) {
+			const seconds = triggerToSeconds(reminder.trigger);
+			if (seconds === null) {
+				continue;
+			}
+			resultLine += ` ${keywords.REMINDER} ${secondsToShorthand(seconds)}`;
+		}
+		return resultLine;
+	}
+
+	//Parse `⏰ <value>` tokens. A value of `off` clears all reminders; multiple
+	//`⏰ <duration>` tokens add multiple reminders.
+	getRemindersFromLine(lineText: string): { reminders: Reminder[]; clear: boolean } {
+		const reminders: Reminder[] = [];
+		let clear = false;
+		for (const match of lineText.matchAll(REGEX.REMINDER_RULE)) {
+			const parsed = parseReminderText(match[1]);
+			if (!parsed) {
+				continue;
+			}
+			if ('clear' in parsed) {
+				clear = true;
+			} else {
+				reminders.push({ trigger: parsed.trigger });
+			}
+		}
+		if (clear) {
+			return { reminders: [], clear: true };
+		}
+		return { reminders, clear: false };
+	}
+
+	//True when the reminder sets (by trigger value) differ between the line task
+	//and the last-known state. Triggers are compared in their normalized form,
+	//so `TRIGGER:PT35M` (as written in a line) matches `TRIGGER:-PT35M` (as
+	//TickTick returns it). `⏰ off` (clearReminders) always counts as changed
+	//when there were reminders to clear.
+	areRemindersChanged(lineTask: ITask, savedTask: ITask): boolean {
+		const lineTriggers = (lineTask.reminders || []).map(r => normalizeTrigger(r.trigger));
+		const savedTriggers = (savedTask.reminders || []).map(r => normalizeTrigger(r.trigger));
+		const sort = (arr: string[]) => [...arr].sort();
+		if (lineTask.clearReminders && savedTriggers.length > 0) {
+			return true;
+		}
+		if (lineTriggers.length !== savedTriggers.length) {
+			return true;
+		}
+		return JSON.stringify(sort(lineTriggers)) !== JSON.stringify(sort(savedTriggers));
+	}
+
+	//Carry over reminders from the last-known state when the line task has none
+	//and the user didn't explicitly ask to clear them (`⏰ off`). This stops a
+	//plain Obsidian text edit from silently wiping a TickTick-side reminder.
+	//Also merges TickTick ids onto line reminders by matching trigger (in
+	//normalized form, so `PT35M` matches `-PT35M`), keeping the original
+	//TickTick trigger value so an update to `batch/task` keeps referencing the
+	//existing reminder objects.
+	preserveReminders(lineTask: ITask, savedTask: ITask | null | undefined): void {
+		if (lineTask.clearReminders) {
+			lineTask.reminders = [];
+			return;
+		}
+		const savedReminders = savedTask?.reminders;
+		if (!savedReminders?.length) {
+			return;
+		}
+		if (!lineTask.reminders || lineTask.reminders.length === 0) {
+			lineTask.reminders = savedReminders;
+			return;
+		}
+		lineTask.reminders = lineTask.reminders.map(reminder => {
+			if (reminder.id) {
+				return reminder;
+			}
+			const match = savedReminders.find(saved => normalizeTrigger(saved.trigger) === normalizeTrigger(reminder.trigger));
+			return match ? { ...reminder, id: match.id, trigger: match.trigger } : reminder;
+		});
 	}
 
 	// Same detection heuristic stripOBSUrl uses to find/remove the link --
@@ -219,6 +317,7 @@ export class TaskParser {
 			.replace(REGEX.TASK_CONTENT.REMOVE_TickTick_LINK, '')
 			.replace(REGEX.TASK_CONTENT.REMOVE_PRIORITY, '')
 			.replace(REGEX.TASK_CONTENT.REMOVE_RECURRENCE, '')
+			.replace(REGEX.TASK_CONTENT.REMOVE_REMINDER, '')
 			.replace(REGEX.TASK_CONTENT.REMOVE_TAGS, ' ')
 			.replace(REGEX.TASK_CONTENT.REMOVE_CHECKBOX, '')
 			.replace(REGEX.TASK_CONTENT.REMOVE_CHECKBOX_WITH_INDENTATION, '')
@@ -234,10 +333,40 @@ export class TaskParser {
 		return line;
 	}
 
+	/**
+	 * When the stopInjectingTickTickTag setting is enabled, convertLineToTask
+	 * excludes the "ticktick" control tag from lineTask.tags. If TickTick
+	 * already independently has a genuine "ticktick" tag on this task (per our
+	 * last-known state in savedTask), carry it over here so comparisons and
+	 * updates never silently strip it. We only ever preserve what's already
+	 * there -- never actively add it back.
+	 */
+	preserveTickTickTag(lineTask: ITask, savedTask: ITask | null | undefined): void {
+		if (!getSettings().stopInjectingTickTickTag) return;
+		if (savedTask?.tags?.some(t => t.toLowerCase() === 'ticktick') &&
+			!lineTask.tags?.some(t => t.toLowerCase() === 'ticktick')) {
+			lineTask.tags = [...(lineTask.tags || []), 'ticktick'];
+		}
+	}
+
+	/**
+	 * Actively remove the "ticktick" tag from the task's tags. Used during a
+	 * full reset (forceUpdates) when the user opted into stripTickTickTagOnReset,
+	 * so legacy injected tags are cleaned up on TickTick. The counterpart to
+	 * preserveTickTickTag. The caller decides when to strip vs preserve.
+	 */
+	stripTickTickTag(lineTask: ITask): void {
+		lineTask.tags = (lineTask.tags || []).filter(t => t.toLowerCase() !== 'ticktick');
+	}
+
 	addTagsToLine(resultLine: string, tags: string[]) {
 		//we're looking for the ticktick tag without the #
 		const regEx = new RegExp(keywords.TickTick_TAG.substring(1), 'i');
 		const tagSvc = this.plugin?.tagService;
+		// Snapshot the vault's tags once so we can decide whether a hyphenated
+		// tag's leading segment is an existing parent (hierarchy) or a literal
+		// flat tag. Doing it once per line avoids N metadataCache lookups.
+		const vaultTags = this.getVaultTags();
 		tags.forEach((tag: string) => {
 			//TickTick tag, if present, will be added at the end.
 			if (!tag.match(regEx)) {
@@ -248,15 +377,19 @@ export class TaskParser {
 					if (hierarchical) {
 						display = hierarchical.trim();
 					} else {
-						// Fallback: old -→/ conversion for backward compat
+						// Fallback: only convert - → / when the tag genuinely
+						// belongs to a known hierarchy (its leading segment is an
+						// existing parent). Otherwise keep the flat hyphenated
+						// label verbatim — e.g. `a12s-2026-q2` must stay flat,
+						// not become `a12s/2026/q2`.
 						display = (tagSvc.getLabel(tag) ?? tag).trim();
-						if (display.includes('-')) {
+						if (this.tagIsHierarchical(tag, tagSvc, vaultTags)) {
 							display = display.replace(/-/g, '/');
 						}
 					}
 				} else {
 					display = tag.trim();
-					if (display.includes('-')) {
+					if (this.tagIsHierarchical(tag, undefined, vaultTags)) {
 						display = display.replace(/-/g, '/');
 					}
 				}
@@ -264,6 +397,63 @@ export class TaskParser {
 			}
 		});
 		return resultLine;
+	}
+
+	/**
+	 * True when a TickTick tag name should be rendered/interpreted as part of a
+	 * hierarchy (so hyphen segments become slash segments). This is only the case
+	 * when the tag's leading hyphen-segment already exists as a parent tag in
+	 * either Obsidian's vault tags (metadataCache) or TickTick's cached tag list
+	 * (TagService). A bare hyphenated tag like `a12s-2026-q2` with no known
+	 * `a12s` parent stays flat.
+	 */
+	private tagIsHierarchical(name: string, tagSvc: TagService | undefined, vaultTags: Record<string, number>): boolean {
+		// Already known as a child in TickTick's cache.
+		if (tagSvc?.getParent(name)) return true;
+
+		// Leading hyphen-segment (e.g. "a12s" from "a12s-2026-q2").
+		const segments = name.split('-');
+		if (!segments.length || !segments[0]) return false;
+		const needle = segments[0].trim().toLowerCase() + '/';
+
+		// Any vault tag that starts with "<seg>/" means <seg> is used as a parent.
+		for (const key of Object.keys(vaultTags)) {
+			if (key.toLowerCase().startsWith(needle)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Obsidian's `metadataCache.getTags()` (available at runtime in modern
+	 * Obsidian but not present in the older type definitions) returns a map of
+	 * tag -> count for the whole vault. We consult it to decide whether a
+	 * hyphenated tag's leading segment is an existing parent tag. Falls back to
+	 * an empty map when unavailable.
+	 */
+	private getVaultTags(): Record<string, number> {
+		const mc = this.app?.metadataCache as (MetadataCache & { getTags?: () => Record<string, number> }) | undefined;
+		return mc?.getTags?.() ?? {};
+	}
+
+	/**
+	 * Returns the slash form of a raw Obsidian tag for the purpose of hierarchy
+	 * splitting. A tag containing an explicit `/` is already hierarchical and is
+	 * returned unchanged. A bare hyphenated tag (`a12s-2026-q2`) only gains
+	 * hierarchy when its leading hyphen-segment (`a12s`) is an existing parent
+	 * tag — matching the render direction and the "explicit slash form" rule for
+	 * creating brand-new hierarchies. Otherwise it stays flat.
+	 */
+	private effectiveTagForHierarchy(raw: string): string {
+		if (raw.includes('/')) return raw;
+		const segments = raw.split('-');
+		if (!segments.length || !segments[0]) return raw;
+		const seg = segments[0].trim().toLowerCase();
+		const vaultTags = this.getVaultTags();
+		const needle = seg + '/';
+		for (const key of Object.keys(vaultTags)) {
+			if (key.toLowerCase().startsWith(needle)) return raw.replace(/-/g, '/');
+		}
+		return raw;
 	}
 
 	//convert line text to a task object
@@ -280,6 +470,8 @@ export class TaskParser {
 
 		const recurrenceMatch = textWithoutIndentation.match(REGEX.RECURRENCE_RULE);
 		const recurrenceResult = recurrenceMatch ? tasksTextToRRule(recurrenceMatch[1]) : null;
+
+		const reminderResult = this.getRemindersFromLine(textWithoutIndentation);
 
 		let taskRecord: ITaskRecord;
 
@@ -312,16 +504,22 @@ export class TaskParser {
 		content = __ret.content;
 		taskItems = __ret.taskItems;
 
-		let timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		// A timezone only means something relative to a date -- don't
+		// manufacture one for a task that doesn't have either.
+		let timeZone: string | undefined;
+		if (allDatesStruct?.dueDate || allDatesStruct?.startDate) {
+			timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		}
 
-		// The #ticktick tag is Obsidian-side control signal (marks this line
-		// as plugin-tracked) -- it's not a real tag and must never be sent
-		// to TickTick as one. Excluded here so it never flows into task.tags
-		// for creation, comparison, or update; see TaskModificationDetector
-		// for the separate step that preserves a *genuinely* TT-side
-		// "ticktick" tag if one already exists there independently.
+		// The #ticktick tag is an Obsidian-side control signal (marks this
+		// line as plugin-tracked). It has historically also been injected as
+		// a real TickTick tag; that injection is opt-out via the
+		// stopInjectingTickTickTag setting. When opted out, it's excluded
+		// here so it never flows into task.tags for creation, comparison, or
+		// update -- see preserveTickTickTag for the step that keeps a
+		// *genuinely* TT-side "ticktick" tag if one already exists there.
 		const rawTags = this.getAllTagsFromLineText(textWithoutIndentation)
-			.filter(t => t.toLowerCase() !== 'ticktick');
+			.filter(t => getSettings().stopInjectingTickTickTag ? t.toLowerCase() !== 'ticktick' : true);
 
 		// Resolve tags: handle hierarchy and create unknown tags in TickTick
 		const tagSvc = this.plugin?.tagService;
@@ -342,7 +540,7 @@ export class TaskParser {
 						tagsToCreate.push({ label: raw, name, parent: null });
 					}
 				} else {
-					const parts = raw.split('/');
+					const parts = this.effectiveTagForHierarchy(raw).split('/');
 					if (parts.length === 1) {
 						// Simple tag (no hierarchy)
 						if (!tagSvc.isKnownTag(raw)) {
@@ -390,7 +588,7 @@ export class TaskParser {
 		let tags: string[];
 		if (tagSvc) {
 			tags = rawTags.map(raw => {
-				const parts = raw.split('/');
+				const parts = this.effectiveTagForHierarchy(raw).split('/');
 				if (parts.length === 1) return tagSvc.resolveToName(raw);
 				if (parts.length === 2) return tagSvc.resolveToName(parts[1]);
 				return tagSvc.resolveToName(parts.slice(1).join('-'));
@@ -399,14 +597,37 @@ export class TaskParser {
 			tags = rawTags.map(raw => raw.toLowerCase().replace(/[/\s]+/g, '-').replace(/-+/g, '-'));
 		}
 
-		// New tasks always go to the account default project (Inbox), never
-		// inferred from the file or a tag -- Project is never something
-		// Obsidian gets to decide. Subtasks are the one exception: TickTick
-		// requires a subtask to share its parent's project.
+		// Fork default off (settings.guessProjectAutomatically): a brand-new
+		// task with no TickTick-side project yet goes to the account default
+		// (Inbox) instead of a guessed one -- Project is TickTick-side
+		// metadata only.
 		let projectId = getSettings().defaultProjectId || getSettings().inboxID;
 
 		if (hasParent && parentTaskObject) {
 			projectId = parentTaskObject.projectId;
+		} else if (getSettings().guessProjectAutomatically) {
+			projectId = await this.plugin.fileTaskQueries?.getDefaultProjectIdForFilepath(filepath) ?? projectId;
+			// Check if we need to add this to a specific project by tag.
+			// Use rawTags (pre-resolution) so underscores are preserved for matching.
+			if (rawTags) {
+				for (const rawTag of rawTags) {
+					const labelName = rawTag.replace(/[/_]/g, ' ');
+					const hasProjectId = (await getAllProjects()).find(obj => obj.name.toLowerCase() === labelName.toLowerCase())?.id;
+					if (!hasProjectId) {
+						continue;
+					}
+					projectId = hasProjectId;
+					break;
+				}
+			}
+		} else if (TickTick_id) {
+			// settings.guessProjectAutomatically is off: an already-tracked
+			// task keeps its real, current project instead of having it
+			// re-derived from file/tag context on every parse.
+			const existingTask = await this.plugin.taskRepository?.loadTaskById(TickTick_id);
+			if (existingTask?.projectId) {
+				projectId = existingTask.projectId;
+			}
 		}
 
 		const title = this.getTaskContentFromLineText(textWithoutIndentation);
@@ -434,7 +655,8 @@ export class TaskParser {
 			childIds: [],
 			sortOrder: 0,
 			reminder: '',
-			reminders: [],
+			reminders: reminderResult.clear ? [] : reminderResult.reminders,
+			clearReminders: reminderResult.clear || undefined,
 			progress: 0,
 			deleted: 0,
 			lineHash: '',
@@ -726,6 +948,31 @@ export class TaskParser {
 	}
 
 
+	//task project id compare
+	async isProjectIdChanged(lineTask: ITask, TickTickTask: ITask) {
+		if (lineTask.projectId !== TickTickTask.projectId) {
+			log.debug('Project ID changed: ', lineTask.projectId, TickTickTask.projectId);
+			//make sure that they're not in a non-project file.
+			const taskFile = await this.plugin.fileMetadataService.getFilepathForTask(TickTickTask.id);
+			if (taskFile) {
+				// log.debug('Task file: ', taskFile);
+				const hasADefaultProject = await this.plugin.fileTaskQueries.filepathHasDefaultProjectID(taskFile)
+				if (hasADefaultProject) {
+					return true;
+				} else {
+					log.debug('Task file does not have a default project: ', taskFile);
+					//hate to do a notification from here, but I don't want to blindside them either.
+					new Notice(`Task ${TickTickTask.title} was moved in TickTick, but is in ${taskFile}. Assuming that this is intentional and not moving it.`, 10000	);
+
+					return false;
+				}
+
+			}
+		} else {
+			return false;
+		}
+	}
+
 	//Determine whether the task is indented
 	isIndentedTask(text: string) {
 		return (REGEX.TASK_INDENTATION.test(text));
@@ -993,10 +1240,9 @@ export class TaskParser {
 		//TODO figure out Note presentation
 		//admonitions just don't work in indented tasks. Until I sort out the presentation, keep it simple until I
 		//get all the functionality sorted out,
-		const rawPath = await this.plugin.fileMetadataService.getFilepathForProjectId(projectId) ?? '';
-		const path = encodeURI(rawPath);
-
-		const linkRegex = new RegExp(`\\[.*\\]\\(obsidian://open\\?vault=.*&file=${path}\\)`, 'giu');
+		// Matches the file link the plugin prepends to a task note when
+		// fileLinksInTickTick is 'noteLink': [file](obsidian://open?vault=..&file=..)
+		const linkRegex = new RegExp(`\\[.*\\]\\(obsidian://open\\?vault=[^)]*&file=[^)]*\\)`, 'giu');
 		let noteLines: string[];
 
 		if (content.length > 0) {
@@ -1006,11 +1252,13 @@ export class TaskParser {
 		}
 
 		if (getSettings().taskLinksInObsidian === 'taskLink' && getSettings().fileLinksInTickTick == 'noteLink') {
-			//if the only note line is the link, and the link is going in the task. return.
-			if (noteLines.length > 1) {
-				//the link is always the first item
+			// The note's first line is normally the file link the plugin prepended
+			// when the task was pushed to TickTick. Only drop it when it actually
+			// is such a link; a task created in TickTick may have real note content
+			// on its first line.
+			if (noteLines.length > 0 && noteLines[0].trim().search(linkRegex) >= 0) {
 				noteLines.splice(0, 1);
-				if (noteLines.length === 1 && noteLines[0].trim().length === 0) {
+				if (noteLines.length === 0 || (noteLines.length === 1 && noteLines[0].trim().length === 0)) {
 					//just the link. bail
 					return resultLine;
 				}

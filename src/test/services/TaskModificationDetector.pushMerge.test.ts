@@ -23,12 +23,16 @@ import { Notice } from 'obsidian';
 
 vi.mock('@/db/projects', () => ({
 	getAllProjects: vi.fn().mockResolvedValue([]),
+	getPausedProjectIds: vi.fn().mockResolvedValue(new Set()),
 }));
 
 vi.mock('obsidian', () => ({
+	App: vi.fn(),
 	Notice: vi.fn(),
 	TFile: vi.fn(),
 	TFolder: vi.fn(),
+	Modal: vi.fn(),
+	Setting: vi.fn(),
 }));
 
 const TASK_ID = 'abcdefabcdefabcdefabcdef';
@@ -126,8 +130,8 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 		// marker => 0), so it must match the line to stay "unmodified" here
 		// -- otherwise detectModifications legitimately flags it changed.
 		const savedTask = makeTask({ title: 'Original title', status: 0, priority: 0 });
-		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
-			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		(plugin as { taskRepository: { loadLocalTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadLocalTaskById.mockResolvedValue({ task: savedTask, deleted: false, file: FILEPATH });
 
 		// TickTick's live state: task was completed (status 2) via another
 		// device/mobile, and priority bumped -- neither pulled down yet.
@@ -159,8 +163,8 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 		const line = `- [ ] Original title #ticktick  %%[ticktick_id:: ${TASK_ID}]%%`;
 
 		const savedTask = makeTask({ title: 'Original title', priority: 0 });
-		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
-			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		(plugin as { taskRepository: { loadLocalTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadLocalTaskById.mockResolvedValue({ task: savedTask, deleted: false, file: FILEPATH });
 
 		// Server hasn't seen the priority bump the checkbox line doesn't
 		// encode anyway -- irrelevant here, this test is about a field
@@ -192,8 +196,8 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 		const line = `- [ ] Updated title #ticktick  %%[ticktick_id:: ${TASK_ID}]%%`;
 
 		const savedTask = makeTask({ title: 'Original title', priority: 0 });
-		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
-			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		(plugin as { taskRepository: { loadLocalTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadLocalTaskById.mockResolvedValue({ task: savedTask, deleted: false, file: FILEPATH });
 		getTaskByIdSpy.mockResolvedValue(makeTask({ title: 'Original title', priority: 0 }));
 
 		// Simulate this cycle's pull step having just seen TickTick change
@@ -212,8 +216,8 @@ describe('TaskModificationDetector push path: merge onto live server state', () 
 		const line = `- [ ] Updated title #ticktick  %%[ticktick_id:: ${TASK_ID}]%%`;
 
 		const savedTask = makeTask({ title: 'Original title', priority: 0 });
-		(plugin as { taskRepository: { loadTaskById: ReturnType<typeof vi.fn> } })
-			.taskRepository.loadTaskById.mockResolvedValue(savedTask);
+		(plugin as { taskRepository: { loadLocalTaskById: ReturnType<typeof vi.fn> } })
+			.taskRepository.loadLocalTaskById.mockResolvedValue({ task: savedTask, deleted: false, file: FILEPATH });
 		getTaskByIdSpy.mockResolvedValue(makeTask({ title: 'Original title', priority: 0 }));
 
 		// TickTick changed status remotely, but this edit only touches title --

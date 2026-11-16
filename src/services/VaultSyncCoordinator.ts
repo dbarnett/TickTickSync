@@ -3,7 +3,7 @@
  * Extracts vault sync logic from SyncModule
  */
 
-import { App, Notice, TFile } from 'obsidian';
+import { App, Notice, TFile, TFolder } from 'obsidian';
 import type TickTickSync from '@/main';
 import type { ITask } from '@/api/types/Task';
 import type { LocalTask } from '@/db/schema';
@@ -34,6 +34,31 @@ export class VaultSyncCoordinator {
 		if (syncTag && syncTag.includes('/')) {
 			syncTag = syncTag.replace(/\//g, '-');
 		}
+		const syncProject = getSettings().SyncProject;
+		const andOr = getSettings().tagAndOr;
+
+		const { getPausedProjectIds } = await import('@/db/projects');
+		const pausedProjects = await getPausedProjectIds();
+
+		// A task whose list is no longer known (e.g. the list was trashed in
+		// TickTick) must never be re-homed into the default project. Keep the
+		// set of ids we can legitimately place tasks in.
+		const localProjects = (await db.projects?.toArray?.()) ?? [];
+		const knownProjectIds = new Set(localProjects.map(lp => lp.id));
+		const inboxId = getSettings().inboxID;
+		if (inboxId) knownProjectIds.add(inboxId);
+		const defaultProjectId = getSettings().defaultProjectId;
+		if (defaultProjectId) knownProjectIds.add(defaultProjectId);
+		// Projects that still own a registered file are legitimate too; this
+		// also protects older databases whose project cache is incomplete.
+		const fileRecords = (await db.files?.toArray?.()) ?? [];
+		for (const record of fileRecords) {
+			if (record.defaultProjectId) knownProjectIds.add(record.defaultProjectId);
+		}
+		// Only detect orphans once we have something to compare against. An
+		// empty cache must not make every task look orphaned.
+		const canDetectOrphans = knownProjectIds.size > 0;
+		const orphanedTasksByFile: Map<string, ITask[]> = new Map();
 
 		// Group tasks by file
 		const fileGroups: Map<string, { toAdd: ITask[], toUpdate: ITask[], toDelete: ITask[] }> = new Map();
@@ -43,8 +68,28 @@ export class VaultSyncCoordinator {
 
 		// Categorize tasks by their target file and action needed
 		for (const lt of tasks) {
+			if (pausedProjects.has(lt.task.projectId)) {
+				continue;
+			}
 			const task = lt.task;
-			const matchesFilter = this.matchesFilter(task, syncTag);
+
+			if (canDetectOrphans && task.projectId && !knownProjectIds.has(task.projectId)) {
+				// The owning list does not exist anymore. Mark the task as
+				// deleted and remember any vault line that still contains it.
+				log.debug(`Task ${task.id} belongs to unknown list ${task.projectId}; marking deleted`);
+				if (lt.file) {
+					const list = orphanedTasksByFile.get(lt.file) ?? [];
+					list.push(task);
+					orphanedTasksByFile.set(lt.file, list);
+				}
+				dbUpdates.push({
+					localId: lt.localId,
+					changes: { deleted: true, file: '', updatedAt: Date.now() },
+				});
+				continue;
+			}
+
+			const matchesFilter = this.matchesFilter(task, syncTag, syncProject, andOr);
 
 			let targetFile: string | undefined;
 
@@ -55,7 +100,17 @@ export class VaultSyncCoordinator {
 				if (lt.file) {
 					const existingFile = this.app.vault.getAbstractFileByPath(lt.file);
 					if (existingFile instanceof TFile) {
-						targetFile = lt.file;
+						// A task whose old list was deleted/paused but which was
+						// restored in TickTick (typically into Inbox or another
+						// list) must be treated as moved, not left in the stale
+						// file. Detect this by looking at the file's project.
+						const { getFile } = await import('@/db/files');
+						const fileRecord = await getFile(lt.file);
+						const oldProjectId = fileRecord?.defaultProjectId;
+						const oldProjectGone = !!oldProjectId && pausedProjects.has(oldProjectId);
+						if (!oldProjectGone) {
+							targetFile = lt.file;
+						}
 					}
 				}
 				if (!targetFile) {
@@ -102,8 +157,9 @@ export class VaultSyncCoordinator {
 					dbUpdates.push({ localId: lt.localId, changes: { lastVaultSync: Date.now() } });
 				}
 			} else if (lt.file) {
-				// No longer matches filter, remove from vault
-				group.toDelete.push(task);
+				// Task doesn't match current filter but already exists in vault.
+				// Leave it alone -- do not delete user's existing tasks.
+				continue;
 			}
 		}
 
@@ -112,6 +168,11 @@ export class VaultSyncCoordinator {
 
 		// Process each file group
 		await this.processFileGroups(fileGroups, proceedWithDeletions, tasks, dbUpdates);
+
+		// Tasks belonging to deleted lists may still have lines left behind in
+		// other files (for example when a previous cleanup failed). Remove those
+		// lines without asking again: the user already chose to delete the list.
+		await this.removeOrphanedTaskLines(orphanedTasksByFile);
 
 		// Bulk update DB at the end
 		if (dbUpdates.length > 0) {
@@ -122,23 +183,37 @@ export class VaultSyncCoordinator {
 			});
 			log.debug(`VaultSync: Updated ${dbUpdates.length} task records in DB`);
 		}
+
+		// Ensure all projects with DB file mappings have their vault files
+		await this.ensureProjectFilesExist();
 	}
 
 	/**
-	 * Determine the target file for an untracked task (no known lt.file).
+	 * Remove vault lines of tasks that belong to lists which no longer exist.
+	 * These tasks have already been marked deleted in the DB.
+	 */
+	private async removeOrphanedTaskLines(tasksByFile: Map<string, ITask[]>): Promise<void> {
+		for (const [filePath, tasks] of tasksByFile) {
+			if (tasks.length === 0) continue;
+			const file = this.app.vault.getAbstractFileByPath(filePath);
+			if (!(file instanceof TFile)) continue;
+			try {
+				await this.plugin.fileOperation?.deleteTasksFromSpecificFile(file, tasks, false);
+				log.debug(`Removed ${tasks.length} task(s) belonging to deleted lists from ${filePath}`);
+			} catch (error) {
+				log.error(`Failed to remove tasks of deleted lists from ${filePath}:`, error);
+			}
+		}
+	}
+
+	/**
+	 * Determine the target file for a task based on its project
 	 *
-	 * Deliberately does NOT fall back to "find/create a file for this
-	 * task's project" (the old defaultProjectId reverse lookup) -- that
-	 * silently fanned tasks out into arbitrary notes the first time any
-	 * file happened to get tagged with a matching project, with zero
-	 * explicit action from the user. If a task isn't already tracked in a
-	 * specific vault file, it's simply left untracked (TT-only) until the
-	 * user explicitly ties it to a note.
-	 *
-	 * TODO(orphan-tasks): add an explicit "Insert existing TT task here"
-	 * command (fuzzy picker over untracked TT tasks) as the intentional
-	 * way to bring a task into the vault, replacing the old implicit
-	 * materialization this function used to do.
+	 * Priority:
+	 * 1. If task has default project ID, check if it exists in any unassociated vault files
+	 *    (handles multi-device sync where files arrive before DB is updated)
+	 * 2. File associated with the task's specific project (with folder structure if enabled)
+	 * 3. File associated with the default project
 	 */
 	private async determineTargetFile(
 		task: ITask,
@@ -146,11 +221,9 @@ export class VaultSyncCoordinator {
 	): Promise<string | undefined> {
 		const defaultProjectId = getSettings().defaultProjectId;
 
-		// Check if this task's ID already appears in some vault file that
-		// isn't yet in the DB (e.g. the user manually placed a
-		// %%[ticktick_id::...]%% marker, or a file synced via an external
-		// mechanism before the DB caught up). This only matches an
-		// explicit, already-present marker -- not project-based inference.
+		// Special handling for tasks with default project ID:
+		// Check if this task exists in a vault file that isn't yet in the DB
+		// This handles the case where files sync via external mechanism before DB updates
 		if (task.projectId === defaultProjectId) {
 			const fileWithTask = await this.findTaskInUnassociatedFiles(task.id);
 			if (fileWithTask) {
@@ -163,8 +236,7 @@ export class VaultSyncCoordinator {
 			return cache.get(task.projectId)!;
 		}
 
-		// Use FolderSyncService if available (handles folder structure).
-		// Only fires when keepProjectFolders is enabled (default: off).
+		// Use FolderSyncService if available (handles folder structure)
 		let targetFile: string | undefined;
 		if (this.folderSyncService && getSettings().keepProjectFolders) {
 			const projectRecord = await db.projects.get(task.projectId);
@@ -178,6 +250,14 @@ export class VaultSyncCoordinator {
 					log.debug(`Ensuring folder exists: ${folderPath}`);
 					await this.folderSyncService.ensureFolderExists(folderPath);
 				}
+			}
+		}
+
+		// Fallback to legacy behavior
+		if (!targetFile) {
+			targetFile = await this.plugin.fileMetadataService.getFilepathForProjectId(task.projectId);
+			if (!targetFile) {
+				targetFile = await this.plugin.fileMetadataService.getFilepathForProjectId(defaultProjectId);
 			}
 		}
 
@@ -238,11 +318,18 @@ export class VaultSyncCoordinator {
 	}
 
 	/**
-	 * Check if a task matches the sync filter (tag)
+	 * Check if a task matches the sync filter (tag/project)
 	 */
-	private matchesFilter(task: ITask, syncTag?: string): boolean {
-		if (!syncTag) return true;
-		return task.tags?.some(t => t.toLowerCase() === syncTag) ?? false;
+	private matchesFilter(task: ITask, syncTag?: string, syncProject?: string, andOr?: number): boolean {
+		if (!syncTag && !syncProject) return true;
+
+		const hasTag = syncTag ? (task.tags?.some(t => t.toLowerCase() === syncTag) ?? false) : false;
+		const hasProject = syncProject ? task.projectId === syncProject : false;
+
+		if (syncTag && syncProject) {
+			return andOr === 1 ? (hasTag && hasProject) : (hasTag || hasProject);
+		}
+		return hasTag || hasProject;
 	}
 
 	/**
@@ -316,6 +403,67 @@ export class VaultSyncCoordinator {
 			// 3. Handle Additions
 			if (group.toAdd.length > 0) {
 				await this.plugin.fileOperation?.synchronizeToVault(filePath, group.toAdd, false);
+			}
+		}
+	}
+
+	/**
+	 * Ensure all projects with DB file mappings have their vault files.
+	 * This covers projects that have no tasks yet but still need a file created.
+	 */
+	private async ensureProjectFilesExist(): Promise<void> {
+		const allFileRecords = await db.files.toArray();
+		const managedFiles = allFileRecords.filter(f => f.defaultProjectId);
+
+		// Do not recreate files for lists that are archived/deleted/paused.
+		const localProjects = await db.projects.toArray();
+		const frozenProjectIds = new Set(
+			localProjects
+				.filter(lp => lp.archived || lp.deleted || lp.syncPaused || lp.userPaused)
+				.map(lp => lp.id)
+		);
+
+		for (const fileRecord of managedFiles) {
+			if (fileRecord.defaultProjectId && frozenProjectIds.has(fileRecord.defaultProjectId)) {
+				log.debug(`Skipping archived/deleted/paused list file: ${fileRecord.path}`);
+				continue;
+			}
+			const file = this.app.vault.getAbstractFileByPath(fileRecord.path);
+			if (file instanceof TFile) {
+				continue;
+			}
+
+			log.debug(`Ensuring project file exists: ${fileRecord.path}`);
+			try {
+				let normalizedPath = fileRecord.path;
+				if (normalizedPath.startsWith('/')) {
+					normalizedPath = normalizedPath.substring(1);
+				}
+
+				const parentPath = normalizedPath.includes('/') ? normalizedPath.substring(0, normalizedPath.lastIndexOf('/')) : '';
+				if (parentPath) {
+					const parts = parentPath.split('/').filter(Boolean);
+					let current = '';
+					for (const part of parts) {
+						current = current ? `${current}/${part}` : part;
+						const folder = this.app.vault.getAbstractFileByPath(current);
+						if (!folder) {
+							await this.app.vault.createFolder(current);
+						} else if (!(folder instanceof TFolder)) {
+							log.error(`Path conflict: ${current} exists and is not a folder`);
+							return;
+						}
+					}
+				}
+
+				const whoAdded = `${this.plugin.manifest.name} -- ${this.plugin.manifest.version}`;
+				await this.app.vault.create(normalizedPath, `== Added by ${whoAdded} == `);
+			} catch (error) {
+				if ((error as Error).message?.includes('File already exists')) {
+					log.debug(`File already exists: ${fileRecord.path}`);
+				} else {
+					log.error(`Error creating project file ${fileRecord.path}:`, error);
+				}
 			}
 		}
 	}

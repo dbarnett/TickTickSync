@@ -10,6 +10,9 @@ vi.mock('@/db/projects', () => ({
 function makePlugin(parser: TaskParser) {
   return {
     taskParser: parser,
+    fileTaskQueries: {
+      getDefaultProjectIdForFilepath: (_: string) => 'proj-1',
+    },
     fileMetadataService: {
       getFilepathForTask: (_: string) => 'Some/Path.md',
     },

@@ -49,6 +49,8 @@
 					TickTickTasksFilePath: settings.TickTickTasksFilePath
 				},
 			syncControl: {
+				SyncProject: settings.SyncProject,
+				tagAndOr: settings.tagAndOr,
 				SyncTag: settings.SyncTag
 			},
 			noteSetting: {

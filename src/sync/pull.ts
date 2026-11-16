@@ -4,8 +4,10 @@ import { logSyncEvent } from "./journal";
 import { clearRemoteChangedTracking, markRemoteChanged } from "./conflictTracking";
 import type { TickTickRestAPI } from '@/services/TicktickRestAPI';
 import type { LocalTask, SyncMeta } from "@/db/schema";
+import { updateSettings } from '@/settings';
 import type { ITask } from '@/api/types/Task';
 import log from '@/utils/logger';
+import { getPausedProjectIds } from '@/db/projects';
 
 /** Fields whose divergence during pull is worth flagging as a possible simultaneous edit. */
 const CONFLICT_WATCH_FIELDS: (keyof ITask)[] = ['title', 'priority', 'status', 'dueDate', 'startDate'];
@@ -38,6 +40,7 @@ export async function pullFromTickTick(
 	);
 
 	let applied = 0;
+	const pausedProjectIds = await getPausedProjectIds();
 
 	// 1️⃣ Bulk fetch local tasks for all updates
 	const remoteIds = update.map(rt => resolveTaskId(rt as { id?: string; taskId?: string })).filter((id): id is string => !!id);
@@ -47,6 +50,9 @@ export async function pullFromTickTick(
 	const toPut: LocalTask[] = [];
 
 	for (const rt of update) {
+		if (pausedProjectIds.has((rt as any).projectId)) {
+			continue;
+		}
 		const remoteId = resolveTaskId(rt);
 		if (!remoteId) {
 			log.warn("[TickTickSync] Invalid task in update", rt);
@@ -97,17 +103,11 @@ export async function pullFromTickTick(
 
 		const { resolved, conflictDetected, winner } = resolveTaskConflict(local, remoteLocalTask);
 		if (conflictDetected) {
-			// modifiedTime is the actual decision basis (see resolveTaskConflict) --
-			// logging updatedAt here would show numbers unrelated to why this
-			// winner was picked.
 			logSyncEvent(meta.deviceId, "conflict:resolved", {
 				taskId: resolved.taskId,
 				winner,
-				localModifiedTime: local?.task.modifiedTime,
-				remoteModifiedTime: rt.modifiedTime,
 				localUpdatedAt: local?.updatedAt ? new Date(local.updatedAt).toLocaleString() : undefined,
-				remoteUpdatedAt: new Date(remoteUpdatedAt).toLocaleString(),
-				localLastVaultSync: local?.lastVaultSync ? new Date(local.lastVaultSync).toLocaleString() : undefined
+				remoteUpdatedAt: new Date(remoteUpdatedAt).toLocaleString()
 			});
 		}
 		toPut.push(resolved);
@@ -151,6 +151,9 @@ export async function pullFromTickTick(
 			lastDeltaSync: ticktickRestApi.checkpoint
 		});
 	}
+	// Persist checkpoint to data.json so it survives Dexie DB resets
+	updateSettings({ checkPoint: ticktickRestApi.checkpoint });
+	await ticktickRestApi.plugin.saveSettings();
 	logSyncEvent(meta.deviceId, "pull:complete", { applied });
 
 	return applied;

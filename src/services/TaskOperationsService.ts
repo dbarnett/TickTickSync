@@ -70,7 +70,7 @@ export class TaskOperationsService {
 			return;
 		}
 
-		const taskURL = this.plugin.taskParser?.getObsidianUrlFromFilepath(filepath);
+		const { taskURL } = this.plugin.taskParser?.getLinkLocation(filepath) ?? { taskURL: '' };
 		if (!taskURL) {
 			return;
 		}
@@ -81,6 +81,13 @@ export class TaskOperationsService {
 
 				// Add URL to task title
 				task.title = task.title + ' ' + taskURL;
+
+				// Backwards compatibility: keep the "ticktick" tag injected on
+				// the TickTick task unless the user opted out (see
+				// stopInjectingTickTickTag setting).
+				if (!getSettings().stopInjectingTickTickTag && !task.tags?.includes('ticktick')) {
+					task.tags = [...(task.tags || []), 'ticktick'];
+				}
 
 				// Update in TickTick
 				const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(task);
@@ -146,6 +153,11 @@ export class TaskOperationsService {
 						// Merge saved data with line data
 						const merged = { ...savedTask, ...lineTask };
 						Object.assign(lineTask, merged);
+						// Reminders have no other in-line source here: carry them over
+						// from the last-known state so a force update can't wipe them.
+						this.plugin.taskParser?.preserveReminders(lineTask, savedTask);
+						// Preserve a genuine TT-side "ticktick" tag (see TaskParser.preserveTickTickTag)
+						this.plugin.taskParser?.preserveTickTickTag(lineTask, savedTask);
 
 						// Update in TickTick
 						const updatedTask = await this.plugin.tickTickRestAPI?.updateTask(lineTask) as ITask;
@@ -233,6 +245,11 @@ export class TaskOperationsService {
 	 */
 	async moveTaskToProject(task: ITask, newProjectId: string, foundInAnotherFile: string|null = null): Promise<void> {
 		try {
+			const { getPausedProjectIds } = await import('@/db/projects');
+			const paused = await getPausedProjectIds();
+			if (paused.has(task.projectId) || paused.has(newProjectId)) {
+				throw new Error('Cannot move tasks in or out of a paused list');
+			}
 			const oldProjectId = task.projectId;
 			await this.plugin.tickTickRestAPI?.moveTaskProject(task, oldProjectId, newProjectId);
 
