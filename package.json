@@ -1,6 +1,6 @@
 {
 	"name": "tickticksync",
-	"version": "2.1.4-alpha",
+	"version": "2.1.5-alpha",
 	"description": "Sync tasks and notes bidirectionally with TickTick.",
 	"main": "main.js",
 	"scripts": {
